@@ -332,13 +332,14 @@ async function loadZip(zip) {
 
   const loc = { zip, place, lat, lon, era5, forecast, station: null, stationState: 'idle', warnings, merged: {} };
   cache.set(zip, loc);
-  if ($('source').value === 'longest') {
+  if (!era5.size) {
+    // ERA5 is down or rate-limited: fall back to the NOAA station record whatever the selected source.
+    setStatus(`ERA5 unavailable — loading the NOAA station record for ${place} instead (can take a minute)…`);
+    $('source').value = 'longest';
     ensureStation(loc);
-    if (!era5.size) {
-      await loc.stationP.catch(() => {});
-      if (!(loc.station && loc.station.days.size)) throw new Error('No history could be loaded. ' + warnings.join(' · '));
-    }
-  } else if (!era5.size) throw new Error('No history could be loaded. ' + warnings.join(' · '));
+    await loc.stationP.catch(() => {});
+    if (!(loc.station && loc.station.days.size)) throw new Error('No history could be loaded. ' + warnings.join(' · '));
+  } else if ($('source').value === 'longest') ensureStation(loc);
   return loc;
 }
 
