@@ -234,7 +234,8 @@ function setStatus(msg, err, sub) {
 }
 
 async function loadZip(zip) {
-  if (cache.has(zip)) return cache.get(zip);
+  // A partial load (some source failed) is kept for re-rendering but refetched on the next explicit Look up.
+  if (cache.has(zip) && !cache.get(zip).warnings.length) return cache.get(zip);
 
   setStatus('Looking up zip code…');
   const g = await fetch(`https://api.zippopotam.us/us/${zip}`);
@@ -245,37 +246,50 @@ async function loadZip(zip) {
   const place = `${p['place name']}, ${p['state abbreviation']}`;
 
   setStatus(`Fetching daily history for ${place}… (ERA5 + NOAA station search; 10–20 s)`);
-  const [om, station] = await Promise.all([
-    loadOpenMeteo(lat, lon),
-    loadStation(lat, lon).catch(err => { console.warn('Station data unavailable:', err); return null; }),
-  ]);
+  // Each source fails independently; we proceed with whatever loaded and report the rest.
+  const results = await Promise.allSettled([loadArchive(lat, lon), loadForecast(lat, lon), loadStation(lat, lon)]);
+  const warnings = [];
+  const take = (i, label, fallback) => {
+    if (results[i].status === 'fulfilled') return results[i].value;
+    const msg = results[i].reason && results[i].reason.message || String(results[i].reason);
+    warnings.push(`${label}: ${msg}`);
+    return fallback;
+  };
+  const era5 = take(0, 'ERA5 unavailable', new Map());
+  const forecast = take(1, 'Forecast unavailable', new Map());
+  const station = take(2, 'NOAA station unavailable', null);
+  if (!era5.size && !(station && station.days.size)) throw new Error('No history could be loaded. ' + warnings.join(' · '));
 
-  const loc = { place, lat, lon, ...om, station, merged: {} };
+  const loc = { place, lat, lon, era5, forecast, station, warnings, merged: {} };
   cache.set(zip, loc);
   return loc;
 }
 
-async function loadOpenMeteo(lat, lon) {
-  const today = new Date();
-  const archiveEnd = new Date(today); archiveEnd.setDate(archiveEnd.getDate() - 7);
-  const daily = 'temperature_2m_max,temperature_2m_min,temperature_2m_mean';
-  const common = `latitude=${lat}&longitude=${lon}&daily=${daily}&temperature_unit=fahrenheit&timezone=auto`;
-  const [a, f] = await Promise.all([
-    fetch(`https://archive-api.open-meteo.com/v1/archive?${common}&start_date=1940-01-01&end_date=${iso(archiveEnd)}`),
-    fetch(`https://api.open-meteo.com/v1/forecast?${common}&past_days=14&forecast_days=1`),
-  ]);
-  if (!a.ok) throw new Error(`Archive request failed (${a.status}).`);
-  if (!f.ok) throw new Error(`Forecast request failed (${f.status}).`);
-  const [aj, fj] = await Promise.all([a.json(), f.json()]);
-  const ingest = (j, src) => {
-    const days = new Map(), d = j.daily;
-    for (let i = 0; i < d.time.length; i++) {
-      if (d.temperature_2m_max[i] == null) continue;
-      days.set(d.time[i], { max: d.temperature_2m_max[i], min: d.temperature_2m_min[i], mean: d.temperature_2m_mean[i], src });
-    }
-    return days;
-  };
-  return { era5: ingest(aj, 'era5'), forecast: ingest(fj, 'forecast') };
+// Open-Meteo: daily max/min only (mean = (max+min)/2, same as the station data, and a lighter request).
+const OM_DAILY = 'daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=auto';
+function ingestOpenMeteo(j, src) {
+  const days = new Map(), d = j.daily;
+  for (let i = 0; i < d.time.length; i++) {
+    const max = d.temperature_2m_max[i], min = d.temperature_2m_min[i];
+    if (max == null && min == null) continue;
+    days.set(d.time[i], { max, min, mean: max != null && min != null ? (max + min) / 2 : null, src });
+  }
+  return days;
+}
+async function omFetch(url, label) {
+  const r = await fetch(url);
+  if (r.status === 429) throw new Error(`${label} rate limit reached (Open-Meteo 429) — try again in a few minutes`);
+  if (!r.ok) throw new Error(`${label} request failed (${r.status})`);
+  return r.json();
+}
+async function loadArchive(lat, lon) {
+  const end = new Date(); end.setDate(end.getDate() - 7);
+  const j = await omFetch(`https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&${OM_DAILY}&start_date=1940-01-01&end_date=${iso(end)}`, 'ERA5 archive');
+  return ingestOpenMeteo(j, 'era5');
+}
+async function loadForecast(lat, lon) {
+  const j = await omFetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&${OM_DAILY}&past_days=14&forecast_days=1`, 'Forecast');
+  return ingestOpenMeteo(j, 'forecast');
 }
 
 // Find the nearest GHCN-Daily station (within ~0.5° box) with the longest well-covered TMAX record, and fetch it.
@@ -359,7 +373,10 @@ function render(loc) {
     const diff = Math.round((d - anchor) / 86400000);
     if (Math.abs(diff) <= win) samples.push({ year: y, date, value: v[metric], src: v.src[metric] });
   }
-  if (samples.length < 10) return setStatus('Not enough historical data for that date.', true);
+  if (samples.length < 10) {
+    const why = loc.warnings.length ? ' ' + loc.warnings.join(' · ') : '';
+    return setStatus(`Not enough historical data for that date${mode === 'era5' && !loc.era5.size ? ' from ERA5; try the "Longest" source' : ''}.${why}`, true);
+  }
   const allYears = samples.map(s => s.year);
   const firstYear = Math.min(...allYears), lastYear = Math.max(...allYears);
 
@@ -393,6 +410,7 @@ function render(loc) {
       ? ` Station: ${loc.station.name} (${loc.station.id}), ${loc.station.dist.toFixed(0)} mi away, ${loc.station.start}–${loc.station.end}, ${loc.station.coverage.toFixed(0)}% coverage.`
       : ' No long-record NOAA station found nearby; using ERA5 only.';
   }
+  if (loc.warnings.length) sub += ' ⚠ ' + loc.warnings.join(' · ') + '.';
   setStatus(`${loc.place} · ${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)} · records ${firstYear}–${lastYear} · baseline ${baseLabel}`, false, sub);
 
   // Hero tiles
