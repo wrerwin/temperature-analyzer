@@ -50,6 +50,9 @@
     border: 1px solid var(--axis); border-radius: 6px; padding: 7px 10px;
   }
   input[type=text] { width: 110px; }
+  input[type=number] { width: 84px; }
+  .range { display: inline-flex; align-items: center; gap: 4px; }
+  .status .src { display: block; font-size: 13px; color: var(--muted); }
   button { cursor: pointer; background: var(--series); color: #fff; border-color: transparent; font-weight: 600; }
   button:disabled { opacity: .55; cursor: default; }
 
@@ -97,6 +100,7 @@
   .seg input { position: absolute; opacity: 0; width: 0; height: 0; }
   .sline { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; }
   .sdot { fill: var(--series); stroke: var(--surface); stroke-width: 1.5; }
+  .sdot.out { fill: var(--surface); stroke: var(--series); stroke-width: 1.5; }
   .strend { fill: none; stroke: var(--ink-2); stroke-width: 1.5; stroke-dasharray: 5 4; }
   .zero { stroke: var(--ink-2); stroke-width: 1.5; }
   .xhair { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 2; display: none; }
@@ -119,7 +123,7 @@
 <body>
 <main>
   <h1>How unusual is today's temperature?</h1>
-  <p class="sub">Enter a US zip code. Every year back to 1940 for this calendar day is plotted; today is marked against the historical mean and standard deviation.</p>
+  <p class="sub">Enter a US zip code. Every available year for this calendar day is plotted (NOAA station records back to the 1800s where they exist); today is marked against the mean and standard deviation of a baseline period you choose.</p>
 
   <form id="f">
     <label>Zip code <input type="text" id="zip" inputmode="numeric" pattern="\d{5}" placeholder="e.g. 10001" required></label>
@@ -137,6 +141,19 @@
         <option value="3">±3 days</option>
         <option value="7">±7 days</option>
       </select>
+    </label>
+    <label>History source
+      <select id="source">
+        <option value="longest">Longest (NOAA station + ERA5 fill)</option>
+        <option value="era5">ERA5 reanalysis only (1940+)</option>
+      </select>
+    </label>
+    <label>Baseline years
+      <span class="range">
+        <input type="number" id="b0" placeholder="earliest" min="1800" max="2100" step="1">
+        <span>–</span>
+        <input type="number" id="b1" value="2000" placeholder="latest" min="1800" max="2100" step="1">
+      </span>
     </label>
     <button type="submit" id="go">Look up</button>
   </form>
@@ -174,17 +191,19 @@
         <div id="table"></div>
       </details>
     </div>
-    <p class="foot">History: ERA5 reanalysis via Open-Meteo archive (1940–present, ~5 day lag). Recent days and today: Open-Meteo forecast API. Geocoding: zippopotam.us. Today's high may still rise until evening.</p>
+    <p class="foot">Station history: NOAA GHCN-Daily via NCEI (the nearest station within ~35 mi with the longest well-covered record; daily mean = (high+low)/2; lags ~3 days). Reanalysis: ERA5 via Open-Meteo archive (1940–present, ~5 day lag). Recent days and today: Open-Meteo forecast API. Geocoding: zippopotam.us. Today's high may still rise until evening.</p>
   </div>
 </main>
 <div class="tip" id="tip"></div>
 
 <script>
 const $ = id => document.getElementById(id);
-const cache = new Map();          // zip -> { place, lat, lon, days: Map<'YYYY-MM-DD', {max,min,mean}> }
+// zip -> { place, lat, lon, era5: Map<date,{max,min,mean}>, forecast: Map, station: {id,name,dist,days:Map,...}|null, merged: {longest,era5} }
+const cache = new Map();
 const pad = n => String(n).padStart(2, '0');
 const iso = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 const fmt1 = x => (Math.round(x * 10) / 10).toFixed(1);
+const SRC_LABEL = { station: 'NOAA station', era5: 'ERA5', forecast: 'forecast' };
 
 $('date').value = iso(new Date());
 
@@ -196,7 +215,6 @@ $('f').addEventListener('submit', async e => {
   try {
     const loc = await loadZip(zip);
     render(loc);
-    setStatus(`${loc.place} · ${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)} · ${loc.days.size.toLocaleString()} days of data`);
   } catch (err) {
     setStatus(err.message || String(err), true);
     $('out').hidden = true;
@@ -204,12 +222,16 @@ $('f').addEventListener('submit', async e => {
     $('go').disabled = false;
   }
 });
-['metric', 'win', 'date'].forEach(id => $(id).addEventListener('change', () => {
+['metric', 'win', 'date', 'source', 'b0', 'b1'].forEach(id => $(id).addEventListener('change', () => {
   const loc = cache.get($('zip').value.trim());
   if (loc) render(loc);
 }));
 
-function setStatus(msg, err) { $('status').textContent = msg; $('status').className = 'status' + (err ? ' err' : ''); }
+function setStatus(msg, err, sub) {
+  $('status').textContent = msg;
+  if (sub) { const s = document.createElement('span'); s.className = 'src'; s.textContent = sub; $('status').appendChild(s); }
+  $('status').className = 'status' + (err ? ' err' : '');
+}
 
 async function loadZip(zip) {
   if (cache.has(zip)) return cache.get(zip);
@@ -222,12 +244,22 @@ async function loadZip(zip) {
   const lat = +p.latitude, lon = +p.longitude;
   const place = `${p['place name']}, ${p['state abbreviation']}`;
 
-  setStatus(`Fetching 1940–present daily history for ${place}… (this takes a few seconds)`);
+  setStatus(`Fetching daily history for ${place}… (ERA5 + NOAA station search; 10–20 s)`);
+  const [om, station] = await Promise.all([
+    loadOpenMeteo(lat, lon),
+    loadStation(lat, lon).catch(err => { console.warn('Station data unavailable:', err); return null; }),
+  ]);
+
+  const loc = { place, lat, lon, ...om, station, merged: {} };
+  cache.set(zip, loc);
+  return loc;
+}
+
+async function loadOpenMeteo(lat, lon) {
   const today = new Date();
   const archiveEnd = new Date(today); archiveEnd.setDate(archiveEnd.getDate() - 7);
   const daily = 'temperature_2m_max,temperature_2m_min,temperature_2m_mean';
   const common = `latitude=${lat}&longitude=${lon}&daily=${daily}&temperature_unit=fahrenheit&timezone=auto`;
-
   const [a, f] = await Promise.all([
     fetch(`https://archive-api.open-meteo.com/v1/archive?${common}&start_date=1940-01-01&end_date=${iso(archiveEnd)}`),
     fetch(`https://api.open-meteo.com/v1/forecast?${common}&past_days=14&forecast_days=1`),
@@ -235,60 +267,139 @@ async function loadZip(zip) {
   if (!a.ok) throw new Error(`Archive request failed (${a.status}).`);
   if (!f.ok) throw new Error(`Forecast request failed (${f.status}).`);
   const [aj, fj] = await Promise.all([a.json(), f.json()]);
-
-  const days = new Map();
-  const ingest = j => {
-    const d = j.daily;
+  const ingest = (j, src) => {
+    const days = new Map(), d = j.daily;
     for (let i = 0; i < d.time.length; i++) {
       if (d.temperature_2m_max[i] == null) continue;
-      days.set(d.time[i], { max: d.temperature_2m_max[i], min: d.temperature_2m_min[i], mean: d.temperature_2m_mean[i] });
+      days.set(d.time[i], { max: d.temperature_2m_max[i], min: d.temperature_2m_min[i], mean: d.temperature_2m_mean[i], src });
     }
+    return days;
   };
-  ingest(aj); ingest(fj);   // forecast overwrites archive on the overlap; that's fine
+  return { era5: ingest(aj, 'era5'), forecast: ingest(fj, 'forecast') };
+}
 
-  const loc = { place, lat, lon, days };
-  cache.set(zip, loc);
-  return loc;
+// Find the nearest GHCN-Daily station (within ~0.5° box) with the longest well-covered TMAX record, and fetch it.
+async function loadStation(lat, lon) {
+  const box = 0.5;
+  const bbox = `${(lat + box).toFixed(3)},${(lon - box).toFixed(3)},${(lat - box).toFixed(3)},${(lon + box).toFixed(3)}`;
+  const s = await fetch(`https://www.ncei.noaa.gov/access/services/search/v1/data?dataset=daily-summaries&bbox=${bbox}&dataTypes=TMAX&limit=500`);
+  if (!s.ok) throw new Error(`NCEI station search failed (${s.status})`);
+  const sj = await s.json();
+
+  const cands = [];
+  for (const r of sj.results || []) {
+    const st = r.stations && r.stations[0];
+    const tm = st && st.dataTypes.find(t => t.id === 'TMAX');
+    if (!tm || tm.coverage < 75) continue;
+    const start = +tm.startDate.slice(0, 4), end = +tm.endDate.slice(0, 4);
+    const years = end - start + 1;
+    if (years < 30) continue;
+    const [slon, slat] = r.boundingPoints[0].coordinates;
+    const dist = haversineMi(lat, lon, slat, slon);
+    // Score: mostly record length (weighted by coverage); a mild distance penalty breaks near-ties.
+    const score = years * tm.coverage / 100 - dist * 0.4;
+    cands.push({ id: st.id, name: st.name, start, end, coverage: tm.coverage, dist, score, startDate: tm.startDate.slice(0, 10) });
+  }
+  if (!cands.length) return null;
+  cands.sort((a, b) => b.score - a.score);
+  const best = cands[0];
+
+  const d = await fetch(`https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=${best.id}&startDate=${best.startDate}&endDate=${iso(new Date())}&dataTypes=TMAX,TMIN&format=json&units=standard`);
+  if (!d.ok) throw new Error(`NCEI data request failed (${d.status})`);
+  const rows = await d.json();
+  const days = new Map();
+  for (const r of rows) {
+    const max = r.TMAX === undefined || r.TMAX === '' ? null : +r.TMAX;
+    const min = r.TMIN === undefined || r.TMIN === '' ? null : +r.TMIN;
+    if (max == null && min == null) continue;
+    days.set(r.DATE, { max, min, mean: max != null && min != null ? (max + min) / 2 : null, src: 'station' });
+  }
+  return { ...best, days };
+}
+
+function haversineMi(lat1, lon1, lat2, lon2) {
+  const R = 3958.8, toR = x => x * Math.PI / 180;
+  const dLat = toR(lat2 - lat1), dLon = toR(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toR(lat1)) * Math.cos(toR(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Build (and cache) the merged day map for a source mode. Per metric, station value wins where present, ERA5 fills, forecast overrides recent days.
+function mergedDays(loc, mode) {
+  if (loc.merged[mode]) return loc.merged[mode];
+  const out = new Map();
+  const put = (date, v) => {
+    const cur = out.get(date) || { max: null, min: null, mean: null, src: {} };
+    for (const k of ['max', 'min', 'mean']) if (v[k] != null && cur[k] == null) { cur[k] = v[k]; cur.src[k] = v.src; }
+    out.set(date, cur);
+  };
+  for (const [d, v] of loc.forecast) put(d, v);
+  if (mode === 'longest' && loc.station) for (const [d, v] of loc.station.days) put(d, v);
+  for (const [d, v] of loc.era5) put(d, v);
+  return loc.merged[mode] = out;
 }
 
 function render(loc) {
   const metric = $('metric').value;
   const win = +$('win').value;
+  const mode = $('source').value;
   const sel = $('date').value ? new Date($('date').value + 'T12:00:00') : new Date();
   const selIso = iso(sel);
   const selYear = sel.getFullYear();
   const metricName = { max: 'high', min: 'low', mean: 'mean' }[metric];
+  const days = mergedDays(loc, mode);
 
-  // Collect historical samples: every year != selected year, dates within ±win days of the same month/day.
+  // Collect every year's samples for this calendar day (±win), excluding the selected year.
   const samples = [];
-  const years = new Set();
-  for (const [date, v] of loc.days) {
+  for (const [date, v] of days) {
     const y = +date.slice(0, 4);
-    if (y === selYear) continue;
+    if (y === selYear || v[metric] == null) continue;
     const d = new Date(date + 'T12:00:00');
     const anchor = new Date(y, sel.getMonth(), sel.getDate(), 12);
     const diff = Math.round((d - anchor) / 86400000);
-    if (Math.abs(diff) <= win && v[metric] != null) { samples.push({ year: y, date, value: v[metric] }); years.add(y); }
+    if (Math.abs(diff) <= win) samples.push({ year: y, date, value: v[metric], src: v.src[metric] });
   }
   if (samples.length < 10) return setStatus('Not enough historical data for that date.', true);
+  const allYears = samples.map(s => s.year);
+  const firstYear = Math.min(...allYears), lastYear = Math.max(...allYears);
 
-  const vals = samples.map(s => s.value);
+  // Baseline period (inputs blank = unbounded).
+  const b0 = $('b0').value ? +$('b0').value : -Infinity;
+  const b1 = $('b1').value ? +$('b1').value : Infinity;
+  const base = samples.filter(s => s.year >= b0 && s.year <= b1);
+  const baseYears = new Set(base.map(s => s.year));
+  if (base.length < 10) return setStatus(`Only ${base.length} samples in the baseline period ${$('b0').value || firstYear}–${$('b1').value || lastYear}; widen it.`, true);
+  const baseLabel = `${Math.min(...baseYears)}–${Math.max(...baseYears)}`;
+
+  const vals = base.map(s => s.value);
   const n = vals.length;
   const mean = vals.reduce((a, b) => a + b, 0) / n;
   const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1));
   const sorted = [...vals].sort((a, b) => a - b);
   const median = sorted[Math.floor(n / 2)];
 
-  const todayRec = loc.days.get(selIso);
+  const todayRec = days.get(selIso);
   const today = todayRec ? todayRec[metric] : null;
   const z = today == null ? null : (today - mean) / sd;
   const pct = today == null ? null : 100 * sorted.filter(v => v < today).length / n;
 
+  // Status line: where the data came from.
+  const srcCounts = {};
+  for (const s of samples) srcCounts[s.src] = (srcCounts[s.src] || 0) + 1;
+  const srcText = Object.entries(srcCounts).map(([k, c]) => `${SRC_LABEL[k]} ${c}`).join(', ');
+  let sub = `Samples for this day: ${srcText}.`;
+  if (mode === 'longest') {
+    sub += loc.station
+      ? ` Station: ${loc.station.name} (${loc.station.id}), ${loc.station.dist.toFixed(0)} mi away, ${loc.station.start}–${loc.station.end}, ${loc.station.coverage.toFixed(0)}% coverage.`
+      : ' No long-record NOAA station found nearby; using ERA5 only.';
+  }
+  setStatus(`${loc.place} · ${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)} · records ${firstYear}–${lastYear} · baseline ${baseLabel}`, false, sub);
+
   // Hero tiles
   const tiles = [
     ['Selected day ' + metricName, today == null ? '—' : `${fmt1(today)}°F`, selIso + (todayRec ? '' : ' (no data yet)')],
-    ['Historical mean', `${fmt1(mean)}°F`, `median ${fmt1(median)}°F`],
-    ['Std. deviation', `${fmt1(sd)}°F`, `n = ${n} (${years.size} years)`],
+    [`Baseline mean (${baseLabel})`, `${fmt1(mean)}°F`, `median ${fmt1(median)}°F`],
+    ['Std. deviation', `${fmt1(sd)}°F`, `n = ${n} (${baseYears.size} years)`],
     ['z-score', z == null ? '—' : (z >= 0 ? '+' : '') + z.toFixed(2) + 'σ', pct == null ? '' : `${pct.toFixed(0)}th percentile`],
   ];
   $('hero').innerHTML = tiles.map(([k, v, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
@@ -300,25 +411,26 @@ function render(loc) {
     const dir = z >= 0 ? 'warmer' : 'cooler';
     const band = az <= 1 ? 'within 1σ of normal' : az <= 2 ? 'between 1σ and 2σ' : az <= 3 ? 'between 2σ and 3σ' : 'beyond 3σ';
     const rarity = az <= 1 ? 'typical' : az <= 2 ? 'unusual' : az <= 3 ? 'rare' : 'extreme';
-    const warmerYears = sorted.filter(v => v > today).length;
-    verdict = `${band} — ${rarity} · ${fmt1(Math.abs(today - mean))}°F ${dir} than average · ${warmerYears} of ${n} historical days were warmer`;
+    const warmerBase = sorted.filter(v => v > today).length;
+    const warmerAll = samples.filter(s => s.value > today).length;
+    verdict = `${band} — ${rarity} · ${fmt1(Math.abs(today - mean))}°F ${dir} than the ${baseLabel} average · ${warmerBase} of ${n} baseline days were warmer (${warmerAll} of ${samples.length} across all years)`;
   }
   $('verdict').innerHTML = `<div class="verdict"><span class="dot"></span>${verdict}</div>`;
 
-  drawHistogram(samples, { mean, sd, today, metricName });
+  drawHistogram(base, { mean, sd, today, metricName, baseLabel });
 
-  // Per-year series: exact-day value when window = 0, otherwise the window average for that year.
+  // Per-year series over ALL years: exact-day value when window = 0, otherwise the window average for that year.
   const byYear = new Map();
   for (const s of samples) {
-    const r = byYear.get(s.year) || { year: s.year, sum: 0, n: 0 };
+    const r = byYear.get(s.year) || { year: s.year, sum: 0, n: 0, src: s.src };
     r.sum += s.value; r.n++; byYear.set(s.year, r);
   }
-  const series = [...byYear.values()].map(r => ({ year: r.year, value: r.sum / r.n })).sort((a, b) => a.year - b.year);
-  if (today != null) series.push({ year: selYear, value: today, selected: true });
-  lastSeries = { series, mean, sd, metricName, win, selYear };
+  const series = [...byYear.values()].map(r => ({ year: r.year, value: r.sum / r.n, src: r.src, inBase: baseYears.has(r.year) })).sort((a, b) => a.year - b.year);
+  if (today != null) series.push({ year: selYear, value: today, selected: true, src: todayRec.src[metric] });
+  lastSeries = { series, mean, sd, metricName, win, selYear, baseLabel };
   drawSeries();
 
-  drawTable(samples, today, selYear, selIso);
+  drawTable(samples, today, selYear, selIso, baseYears, todayRec && todayRec.src[metric]);
   $('out').hidden = false;
 }
 
@@ -327,7 +439,7 @@ document.querySelectorAll('input[name=smode]').forEach(r => r.addEventListener('
 
 function drawSeries() {
   if (!lastSeries) return;
-  const { series, mean, sd, metricName, win } = lastSeries;
+  const { series, mean, sd, metricName, win, baseLabel } = lastSeries;
   const zmode = document.querySelector('input[name=smode]:checked').value === 'z';
   const W = 880, H = 300, m = { t: 16, r: 20, b: 40, l: 48 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
@@ -380,14 +492,14 @@ function drawSeries() {
   s += `<path class="sline" d="${hist.map((p, i) => (i ? 'L' : 'M') + x(p.year) + ' ' + y(p.y)).join('')}"/>`;
   for (const p of hist) {
     const zval = (p.value - mean) / sd;
-    const tip = `${p.year}: ${fmt1(p.value)}°F (${zval >= 0 ? '+' : ''}${zval.toFixed(2)}σ)`;
-    s += `<circle class="sdot" cx="${x(p.year)}" cy="${y(p.y)}" r="3.5"/>`;
+    const tip = `${p.year}: ${fmt1(p.value)}°F (${zval >= 0 ? '+' : ''}${zval.toFixed(2)}σ) · ${SRC_LABEL[p.src]}${p.inBase ? '' : ' · outside baseline'}`;
+    s += `<circle class="sdot${p.inBase ? '' : ' out'}" cx="${x(p.year)}" cy="${y(p.y)}" r="3.5"/>`;
     s += `<rect class="hit" x="${x(p.year) - iw / (yr1 - yr0) / 2}" y="${m.t}" width="${iw / (yr1 - yr0)}" height="${ih}" data-tip="${tip}" data-x="${x(p.year)}"/>`;
   }
   const sel = pts.find(p => p.selected);
   if (sel) {
     const zval = (sel.value - mean) / sd;
-    const tip = `${sel.year} (selected): ${fmt1(sel.value)}°F (${zval >= 0 ? '+' : ''}${zval.toFixed(2)}σ)`;
+    const tip = `${sel.year} (selected): ${fmt1(sel.value)}°F (${zval >= 0 ? '+' : ''}${zval.toFixed(2)}σ) · ${SRC_LABEL[sel.src]}`;
     s += `<circle class="todaydot" cx="${x(sel.year)}" cy="${y(sel.y)}" r="6" data-tip="${tip}"/>`;
   }
   s += `<line class="xhair" id="xhair" x1="0" x2="0" y1="${m.t}" y2="${m.t + ih}"/>`;
@@ -396,10 +508,11 @@ function drawSeries() {
 
   const winNote = win ? ` (±${win}-day average per year)` : '';
   $('serieslegend').innerHTML = `
-    <span><i class="sw" style="background:var(--series)"></i> ${zmode ? 'z-score' : 'Daily ' + metricName + ' (°F)'}${winNote}</span>
+    <span><i class="sw" style="background:var(--series)"></i> ${zmode ? 'z-score' : 'Daily ' + metricName + ' (°F)'}${winNote}, baseline ${baseLabel}</span>
+    <span><i class="sw" style="background:var(--surface);border:2px solid var(--series)"></i> Outside baseline</span>
     <span><i class="sw" style="background:var(--today)"></i> Selected day</span>
-    <span><i class="sw" style="background:var(--ink-2);height:2px;border-radius:0"></i> Trend ${trendLbl}</span>
-    <span><i class="sw" style="background:rgb(var(--band));opacity:.35"></i> ±1σ / ±2σ / ±3σ bands</span>`;
+    <span><i class="sw" style="background:var(--ink-2);height:2px;border-radius:0"></i> Trend (all years) ${trendLbl}</span>
+    <span><i class="sw" style="background:rgb(var(--band));opacity:.35"></i> ±1σ / ±2σ / ±3σ of baseline</span>`;
 }
 
 function rangeTicks(lo, hi, step) {
@@ -408,7 +521,7 @@ function rangeTicks(lo, hi, step) {
   return out;
 }
 
-function drawHistogram(samples, { mean, sd, today, metricName }) {
+function drawHistogram(samples, { mean, sd, today, metricName, baseLabel }) {
   const W = 880, H = 340, m = { t: 30, r: 20, b: 44, l: 44 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
   const BIN = 1;
@@ -465,7 +578,7 @@ function drawHistogram(samples, { mean, sd, today, metricName }) {
   const step = (hi - lo) > 60 ? 10 : 5;
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step)
     s += `<text class="tick" x="${x(v)}" y="${m.t + ih + 18}" text-anchor="middle">${v}°</text>`;
-  s += `<text class="lbl" x="${m.l}" y="${H - 4}">Daily ${metricName} (°F)</text>`;
+  s += `<text class="lbl" x="${m.l}" y="${H - 4}">Daily ${metricName} (°F), baseline ${baseLabel}</text>`;
   s += `<text class="lbl" x="${W - m.r}" y="${H - 4}" text-anchor="end">Years per bin</text>`;
 
   // mean line
@@ -486,11 +599,11 @@ function drawHistogram(samples, { mean, sd, today, metricName }) {
   $('chart').innerHTML = s;
 }
 
-function drawTable(samples, today, selYear, selIso) {
+function drawTable(samples, today, selYear, selIso, baseYears, todaySrc) {
   const rows = [...samples].sort((a, b) => b.year - a.year || a.date.localeCompare(b.date));
-  let h = '<table><thead><tr><th>Date</th><th>°F</th></tr></thead><tbody>';
-  if (today != null) h += `<tr class="today"><td>${selIso} (selected)</td><td>${fmt1(today)}</td></tr>`;
-  for (const r of rows) h += `<tr><td>${r.date}</td><td>${fmt1(r.value)}</td></tr>`;
+  let h = '<table><thead><tr><th>Date</th><th>°F</th><th>Source</th><th>Baseline</th></tr></thead><tbody>';
+  if (today != null) h += `<tr class="today"><td>${selIso} (selected)</td><td>${fmt1(today)}</td><td>${SRC_LABEL[todaySrc]}</td><td></td></tr>`;
+  for (const r of rows) h += `<tr><td>${r.date}</td><td>${fmt1(r.value)}</td><td>${SRC_LABEL[r.src]}</td><td>${baseYears.has(r.year) ? '✓' : ''}</td></tr>`;
   $('table').innerHTML = h + '</tbody></table>';
 }
 
