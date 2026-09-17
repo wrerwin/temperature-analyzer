@@ -3,20 +3,27 @@
 How unusual is today's temperature? Enter a US zip code and see where today falls
 against every year back to 1940 for the same calendar day.
 
+**Day page**
 - Histogram of the daily high / low / mean for that date over a **baseline period** you choose
   (default: earliest record → 2000), with ±1σ, ±2σ, ±3σ bands shaded and today's value marked
 - z-score, percentile, and a plain-English verdict ("within 1σ of normal — typical")
 - Year-by-year series over the full record with a temperature / z-score toggle and a linear
   trend line; years outside the baseline are drawn hollow
-- **Hot and cold spells** panel: pick a year and month range, and see the smoothed
+- Optional ±3 / ±7 day window to widen the sample; full per-year table with data source per row
+
+**Year page**
+- Pick a year (◀ ▶ to step through) and month range, and see the smoothed
   (1 / 7 / 14 / 30-day) anomaly vs. the baseline day by day, colored blue → gray → red by
   z-score, with ±1σ / ±2σ bands and the biggest warm and cold spells labeled. The baseline
   years are smoothed the same way before computing σ, so the bands are honest at every
   smoothing level.
-- History source toggle: longest available (NOAA station record back to the 1800s where one
-  exists, ERA5 filling gaps) or ERA5 reanalysis only (1940+)
-- Optional ±3 / ±7 day window to widen the sample
-- Full per-year table with data source per row
+- **Pin years** to stack them for comparison on a shared scale.
+
+**Data**
+- History source: ERA5 reanalysis (1940+, default, loads in a couple of seconds) or the
+  longest available record (nearest NOAA station back to the 1800s where one exists, ERA5
+  filling gaps; fetched on demand, can take a minute when NCEI is slow)
+- Records are cached in the browser (localStorage); revisits only fetch the last two weeks
 
 ## Running it
 

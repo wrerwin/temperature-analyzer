@@ -131,12 +131,24 @@
   th:first-child, td:first-child { text-align: left; }
   tr.today td { color: var(--today); font-weight: 600; }
   .foot { color: var(--muted); font-size: 12px; margin-top: 14px; }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--axis); margin-bottom: 16px; }
+  .tabs a { padding: 8px 16px; color: var(--ink-2); text-decoration: none; font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs a.active { color: var(--series); border-bottom-color: var(--series); }
+  .page { display: none; }
+  .page.active { display: block; }
+  button.nav { background: var(--surface); color: var(--ink); border: 1px solid var(--axis); padding: 4px 8px; font-weight: 500; font-size: 13px; }
+  button.nav:hover { border-color: var(--series); }
+  .pinhead { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .pinhead strong { font-size: 15px; }
+  .pinhead .sum { color: var(--ink-2); font-size: 13px; }
+  .pinhead .x { margin-left: auto; }
 </style>
 </head>
 <body>
 <main>
   <h1>How unusual is today's temperature?</h1>
-  <p class="sub">Enter a US zip code. Every available year for this calendar day is plotted (NOAA station records back to the 1800s where they exist); today is marked against the mean and standard deviation of a baseline period you choose.</p>
+  <p class="sub">Enter a US zip code. <strong>Day</strong> shows where today sits in the distribution of every past year for this calendar day; <strong>Year</strong> shows the hot and cold spells of any year against the baseline. History is ERA5 reanalysis (1940+) or, optionally, the nearest NOAA station record back to the 1800s.</p>
 
   <form id="f">
     <label>Zip code <input type="text" id="zip" inputmode="numeric" pattern="\d{5}" placeholder="e.g. 10001" required></label>
@@ -157,8 +169,8 @@
     </label>
     <label>History source
       <select id="source">
+        <option value="era5">ERA5 reanalysis (1940+)</option>
         <option value="longest">Longest (NOAA station + ERA5 fill)</option>
-        <option value="era5">ERA5 reanalysis only (1940+)</option>
       </select>
     </label>
     <label>Baseline years
@@ -173,6 +185,11 @@
 
   <div class="status" id="status"></div>
   <div id="out" hidden>
+    <nav class="tabs" role="tablist">
+      <a href="#day" data-page="day" role="tab">Day</a>
+      <a href="#year" data-page="year" role="tab">Year</a>
+    </nav>
+    <section id="page-day" class="page">
     <div class="card">
       <div class="hero" id="hero"></div>
       <div id="verdict"></div>
@@ -199,10 +216,25 @@
       <div class="legend" id="serieslegend"></div>
     </div>
     <div class="card">
+      <details>
+        <summary>Show every year as a table</summary>
+        <div id="table"></div>
+      </details>
+    </div>
+    </section>
+
+    <section id="page-year" class="page">
+    <div class="card">
       <div class="panelhead">
         <strong>Hot and cold spells vs. baseline</strong>
         <div class="ctl">
-          <label>Year <input type="number" id="ay" min="1800" max="2100" step="1"></label>
+          <label>Year
+            <span class="range">
+              <button type="button" class="nav" id="ayPrev" title="Previous year">◀</button>
+              <input type="number" id="ay" min="1800" max="2100" step="1">
+              <button type="button" class="nav" id="ayNext" title="Next year">▶</button>
+            </span>
+          </label>
           <label>From <select id="am0"></select></label>
           <label>To <select id="am1"></select></label>
           <label>Smoothing
@@ -217,17 +249,14 @@
             <label><input type="radio" name="aunit" value="f" checked> °F</label>
             <label><input type="radio" name="aunit" value="z"> σ</label>
           </div>
+          <button type="button" class="nav" id="pin" title="Keep this year on screen to compare with others">+ Pin year</button>
         </div>
       </div>
       <div id="anom"></div>
       <div class="legend" id="anomlegend"></div>
     </div>
-    <div class="card">
-      <details>
-        <summary>Show every year as a table</summary>
-        <div id="table"></div>
-      </details>
-    </div>
+    <div id="pinned"></div>
+    </section>
     <p class="foot">Station history: NOAA GHCN-Daily via NCEI (the nearest station within ~35 mi with the longest well-covered record; daily mean = (high+low)/2; lags ~3 days). Reanalysis: ERA5 via Open-Meteo archive (1940–present, ~5 day lag). Recent days and today: Open-Meteo forecast API. Geocoding: zippopotam.us. Today's high may still rise until evening.</p>
   </div>
 </main>
@@ -274,8 +303,12 @@ function setStatus(msg, err, sub) {
 
 async function loadZip(zip) {
   // A partial load (some source failed) is kept for re-rendering but refetched on the next explicit Look up.
-  // A load still waiting on the station record is reused as-is.
-  if (cache.has(zip) && (cache.get(zip).pending || !cache.get(zip).warnings.length)) return cache.get(zip);
+  if (cache.has(zip)) {
+    const c = cache.get(zip);
+    if (c.stationState === 'pending' || !c.warnings.length) return c;
+    if (c.stationState === 'failed') { c.stationState = 'idle'; c.warnings = c.warnings.filter(w => !w.startsWith('NOAA station')); }
+    if (!c.warnings.length) return c;
+  }
 
   setStatus('Looking up zip code…');
   const g = await fetch(`https://api.zippopotam.us/us/${zip}`);
@@ -285,10 +318,8 @@ async function loadZip(zip) {
   const lat = +p.latitude, lon = +p.longitude;
   const place = `${p['place name']}, ${p['state abbreviation']}`;
 
-  setStatus(`Fetching daily history for ${place}… (ERA5 first, then the NOAA station record)`);
-  // Each source fails independently. Open-Meteo is fast, so we render as soon as it lands and
-  // patch the station record in when (if) it arrives.
-  const stationP = loadStation(lat, lon);
+  setStatus(`Fetching daily history for ${place}…`);
+  // Each source fails independently; the station record is only fetched when "Longest" is selected (see ensureStation).
   const [ra, rf] = await Promise.allSettled([loadArchive(lat, lon), loadForecast(lat, lon)]);
   const warnings = [];
   const take = (r, label, fallback) => {
@@ -299,56 +330,113 @@ async function loadZip(zip) {
   const era5 = take(ra, 'ERA5 unavailable', new Map());
   const forecast = take(rf, 'Forecast unavailable', new Map());
 
-  const loc = { place, lat, lon, era5, forecast, station: null, pending: true, warnings, merged: {} };
+  const loc = { zip, place, lat, lon, era5, forecast, station: null, stationState: 'idle', warnings, merged: {} };
   cache.set(zip, loc);
-
-  stationP.then(st => { loc.station = st; }, err => { warnings.push(`NOAA station unavailable: ${err.message || err}`); })
-    .finally(() => {
-      loc.pending = false; loc.merged = {};
-      if ($('zip').value.trim() === zip) { try { render(loc); } catch (e) { setStatus(e.message, true); } }
-    });
-
-  if (!era5.size) {
-    // Nothing to show yet; wait for the station record instead.
-    await stationP.catch(() => {});
-    if (!(loc.station && loc.station.days.size)) throw new Error('No history could be loaded. ' + warnings.join(' · '));
-  }
+  if ($('source').value === 'longest') {
+    ensureStation(loc);
+    if (!era5.size) {
+      await loc.stationP.catch(() => {});
+      if (!(loc.station && loc.station.days.size)) throw new Error('No history could be loaded. ' + warnings.join(' · '));
+    }
+  } else if (!era5.size) throw new Error('No history could be loaded. ' + warnings.join(' · '));
   return loc;
 }
 
-// fetch with a hard timeout, so a stalled upstream becomes a warning instead of a frozen page.
-async function fetchT(url, ms, label) {
+// Kick off the NOAA station load once per location; re-render when it lands.
+function ensureStation(loc) {
+  if (loc.stationState !== 'idle') return;
+  loc.stationState = 'pending';
+  loc.stationP = loadStation(loc.lat, loc.lon)
+    .then(st => { loc.station = st; loc.stationState = 'done'; },
+          err => { loc.stationState = 'failed'; loc.warnings.push(`NOAA station unavailable: ${err.message || err}`); })
+    .finally(() => {
+      loc.merged = {};
+      if ($('zip').value.trim() === loc.zip) { try { render(loc); } catch (e) { setStatus(e.message, true); } }
+    });
+}
+
+// Fetch the full body with a hard timeout covering headers AND body (NCEI answers fast, then trickles),
+// so a stalled upstream becomes a warning instead of a frozen page.
+async function fetchText(url, ms, label) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), ms);
-  try { return await fetch(url, { signal: ctl.signal }); }
-  catch (e) { throw new Error(e.name === 'AbortError' ? `${label} timed out after ${ms / 1000}s` : `${label}: ${e.message}`); }
-  finally { clearTimeout(timer); }
+  try {
+    const r = await fetch(url, { signal: ctl.signal });
+    if (r.status === 429) throw new Error(`${label}: rate limit reached (429) — try again in a few minutes`);
+    if (!r.ok) throw new Error(`${label}: request failed (${r.status})`);
+    return await r.text();
+  } catch (e) {
+    throw new Error(e.name === 'AbortError' ? `${label}: timed out after ${Math.round(ms / 1000)}s` : e.message);
+  } finally { clearTimeout(timer); }
 }
+
+// ---- Browser-side cache of daily records (localStorage). A 130-year record packs to ~400 KB;
+// on revisits only the last few weeks are fetched. Values: "max,min" per consecutive day from `start`, ';'-separated.
+const LS_PREFIX = 'ta1:';
+function lsGet(key) { try { return JSON.parse(localStorage.getItem(LS_PREFIX + key)); } catch { return null; } }
+function lsSet(key, val) {
+  const s = JSON.stringify(val);
+  try { localStorage.setItem(LS_PREFIX + key, s); }
+  catch {
+    // Quota: drop our other entries and retry once.
+    try { Object.keys(localStorage).filter(k => k.startsWith(LS_PREFIX) && k !== LS_PREFIX + key).forEach(k => localStorage.removeItem(k)); localStorage.setItem(LS_PREFIX + key, s); } catch {}
+  }
+}
+function packDays(days) {
+  const keys = [...days.keys()].sort();
+  if (!keys.length) return null;
+  const n0 = epochDay(+keys[0].slice(0, 4), +keys[0].slice(5, 7) - 1, +keys[0].slice(8, 10));
+  const n1 = epochDay(+keys[keys.length - 1].slice(0, 4), +keys[keys.length - 1].slice(5, 7) - 1, +keys[keys.length - 1].slice(8, 10));
+  const cells = new Array(n1 - n0 + 1).fill('');
+  for (const [d, v] of days) {
+    const i = epochDay(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) - n0;
+    cells[i] = `${v.max ?? ''},${v.min ?? ''}`;
+  }
+  return { start: keys[0], end: keys[keys.length - 1], v: cells.join(';') };
+}
+function unpackDays(p, src) {
+  const days = new Map();
+  if (!p || !p.v) return days;
+  const n0 = epochDay(+p.start.slice(0, 4), +p.start.slice(5, 7) - 1, +p.start.slice(8, 10));
+  p.v.split(';').forEach((c, i) => {
+    if (!c) return;
+    const [a, b] = c.split(',');
+    const max = a === '' ? null : +a, min = b === '' ? null : +b;
+    const d = fromEpochDay(n0 + i);
+    days.set(`${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`, { max, min, mean: max != null && min != null ? (max + min) / 2 : null, src });
+  });
+  return days;
+}
+const daysAgo = n => { const d = new Date(); d.setDate(d.getDate() - n); return iso(d); };
 
 // Open-Meteo: daily max/min only (mean = (max+min)/2, same as the station data, and a lighter request).
 const OM_DAILY = 'daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=auto';
-function ingestOpenMeteo(j, src) {
-  const days = new Map(), d = j.daily;
+function ingestOpenMeteo(j, src, into = new Map()) {
+  const d = j.daily;
   for (let i = 0; i < d.time.length; i++) {
     const max = d.temperature_2m_max[i], min = d.temperature_2m_min[i];
     if (max == null && min == null) continue;
-    days.set(d.time[i], { max, min, mean: max != null && min != null ? (max + min) / 2 : null, src });
+    into.set(d.time[i], { max, min, mean: max != null && min != null ? (max + min) / 2 : null, src });
+  }
+  return into;
+}
+async function omJson(url, label) { return JSON.parse(await fetchText(url, 45000, label)); }
+async function loadArchive(lat, lon) {
+  const key = `era5:${lat.toFixed(3)},${lon.toFixed(3)}`;
+  const end = daysAgo(7);
+  const cached = lsGet(key);
+  const days = cached ? unpackDays(cached.pack, 'era5') : new Map();
+  // Full history once; afterwards only the tail (ERA5 revises recent days, so overlap by 10 days).
+  const start = cached && cached.pack ? (cached.pack.end < daysAgo(17) ? cached.pack.end : daysAgo(17)) : '1940-01-01';
+  if (start < end) {
+    const j = await omJson(`https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&${OM_DAILY}&start_date=${start}&end_date=${end}`, 'ERA5 archive');
+    ingestOpenMeteo(j, 'era5', days);
+    lsSet(key, { pack: packDays(days) });
   }
   return days;
 }
-async function omFetch(url, label) {
-  const r = await fetchT(url, 30000, label);
-  if (r.status === 429) throw new Error(`${label} rate limit reached (Open-Meteo 429) — try again in a few minutes`);
-  if (!r.ok) throw new Error(`${label} request failed (${r.status})`);
-  return r.json();
-}
-async function loadArchive(lat, lon) {
-  const end = new Date(); end.setDate(end.getDate() - 7);
-  const j = await omFetch(`https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&${OM_DAILY}&start_date=1940-01-01&end_date=${iso(end)}`, 'ERA5 archive');
-  return ingestOpenMeteo(j, 'era5');
-}
 async function loadForecast(lat, lon) {
-  const j = await omFetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&${OM_DAILY}&past_days=14&forecast_days=1`, 'Forecast');
+  const j = await omJson(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&${OM_DAILY}&past_days=14&forecast_days=1`, 'Forecast');
   return ingestOpenMeteo(j, 'forecast');
 }
 
@@ -356,9 +444,7 @@ async function loadForecast(lat, lon) {
 async function loadStation(lat, lon) {
   const box = 0.5;
   const bbox = `${(lat + box).toFixed(3)},${(lon - box).toFixed(3)},${(lat - box).toFixed(3)},${(lon + box).toFixed(3)}`;
-  const s = await fetchT(`https://www.ncei.noaa.gov/access/services/search/v1/data?dataset=daily-summaries&bbox=${bbox}&dataTypes=TMAX&limit=500`, 30000, 'NCEI station search');
-  if (!s.ok) throw new Error(`NCEI station search failed (${s.status})`);
-  const sj = await s.json();
+  const sj = JSON.parse(await fetchText(`https://www.ncei.noaa.gov/access/services/search/v1/data?dataset=daily-summaries&bbox=${bbox}&dataTypes=TMAX&limit=500`, 30000, 'NCEI station search'));
 
   const cands = [];
   for (const r of sj.results || []) {
@@ -378,20 +464,23 @@ async function loadStation(lat, lon) {
   cands.sort((a, b) => b.score - a.score);
   const best = cands[0];
 
+  // Cached record: only fetch the tail (station data can be back-filled, so overlap by 10 days).
+  const key = `ghcn:${best.id}`;
+  const cached = lsGet(key);
+  const days = cached ? unpackDays(cached.pack, 'station') : new Map();
+  const from = cached && cached.pack ? (cached.pack.end < daysAgo(17) ? cached.pack.end : daysAgo(17)) : best.startDate;
+  const today = iso(new Date());
+  if (from >= today) return { ...best, days };
+
   // NCEI throttles per connection, so a 130-year record is fetched as parallel ~25-year chunks (CSV: half the bytes of JSON).
-  const endY = new Date().getFullYear(), chunks = [];
-  for (let y = best.start; y <= endY; y += 25) {
-    const s = y === best.start ? best.startDate : `${y}-01-01`;
-    const e = y + 24 >= endY ? iso(new Date()) : `${y + 24}-12-31`;
+  const endY = new Date().getFullYear(), fromY = +from.slice(0, 4), chunks = [];
+  for (let y = fromY; y <= endY; y += 25) {
+    const s = y === fromY ? from : `${y}-01-01`;
+    const e = y + 24 >= endY ? today : `${y + 24}-12-31`;
     chunks.push(`https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=${best.id}&startDate=${s}&endDate=${e}&dataTypes=TMAX,TMIN&format=csv&units=standard`);
   }
-  const texts = await Promise.all(chunks.map(async u => {
-    const d = await fetchT(u, 240000, `NCEI record for ${best.name}`);
-    if (!d.ok) throw new Error(`NCEI data request failed (${d.status})`);
-    return d.text();
-  }));
+  const texts = await Promise.all(chunks.map(u => fetchText(u, 180000, `NCEI record for ${best.name}`)));
 
-  const days = new Map();
   for (const text of texts) {
     const lines = text.split('\n');
     const head = lines[0].replace(/"/g, '').trim().split(',');
@@ -407,6 +496,7 @@ async function loadStation(lat, lon) {
     }
   }
   if (!days.size) throw new Error(`NCEI returned no temperature rows for ${best.name}`);
+  lsSet(key, { pack: packDays(days) });
   return { ...best, days };
 }
 
@@ -440,6 +530,7 @@ function render(loc) {
   const selIso = iso(sel);
   const selYear = sel.getFullYear();
   const metricName = { max: 'high', min: 'low', mean: 'mean' }[metric];
+  if (mode === 'longest') ensureStation(loc);
   const days = mergedDays(loc, mode);
 
   // Collect every year's samples for this calendar day (±win), excluding the selected year.
@@ -487,8 +578,8 @@ function render(loc) {
   if (mode === 'longest') {
     sub += loc.station
       ? ` Station: ${loc.station.name} (${loc.station.id}), ${loc.station.dist.toFixed(0)} mi away, ${loc.station.start}–${loc.station.end}, ${loc.station.coverage.toFixed(0)}% coverage.`
-      : loc.pending ? ' ⏳ NOAA station record still loading (NCEI is sometimes slow; up to a minute or two) — showing ERA5 for now.'
-      : ' No long-record NOAA station found nearby; using ERA5 only.';
+      : loc.stationState === 'pending' ? ' ⏳ NOAA station record loading (NCEI is sometimes slow; up to a minute or two) — showing ERA5 for now.'
+      : loc.stationState === 'done' ? ' No long-record NOAA station found nearby; using ERA5 only.' : '';
   }
   if (loc.warnings.length) sub += ' ⚠ ' + loc.warnings.join(' · ') + '.';
   setStatus(`${loc.place} · ${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)} · records ${firstYear}–${lastYear} · baseline ${baseLabel}`, false, sub);
@@ -529,7 +620,9 @@ function render(loc) {
   drawSeries();
 
   if (!$('ay').value) $('ay').value = selYear;
-  lastAnom = { loc, days, metric, metricName, b0, b1, baseLabel };
+  const baseYrs = []; for (let y = Math.max(firstYear, b0); y <= Math.min(lastYear + 1, b1); y++) baseYrs.push(y);
+  lastAnom = { metricName, baseLabel, idx: dailyIndex(days, metric), baseYrs, clim: {} };
+  $('ay').min = firstYear; $('ay').max = new Date().getFullYear();
   drawAnomaly();
 
   drawTable(samples, today, selYear, selIso, baseYears, todayRec && todayRec.src[metric]);
@@ -541,8 +634,32 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 MONTHS.forEach((mn, i) => { $('am0').add(new Option(mn, i)); $('am1').add(new Option(mn, i)); });
 $('am1').value = 11;
 let lastAnom = null;
+let pinnedYears = [];
 ['ay', 'am0', 'am1', 'ak'].forEach(id => $(id).addEventListener('change', drawAnomaly));
 document.querySelectorAll('input[name=aunit]').forEach(r => r.addEventListener('change', drawAnomaly));
+$('ayPrev').addEventListener('click', () => { $('ay').value = +$('ay').value - 1; drawAnomaly(); });
+$('ayNext').addEventListener('click', () => { $('ay').value = +$('ay').value + 1; drawAnomaly(); });
+$('pin').addEventListener('click', () => {
+  const y = +$('ay').value;
+  if (!pinnedYears.includes(y)) pinnedYears.push(y);
+  drawAnomaly();
+});
+$('pinned').addEventListener('click', e => {
+  const b = e.target.closest('[data-unpin]');
+  if (!b) return;
+  pinnedYears = pinnedYears.filter(y => y !== +b.dataset.unpin);
+  drawAnomaly();
+});
+
+// ---------- Pages (Day / Year) ----------
+function showPage(name) {
+  if (!['day', 'year'].includes(name)) name = 'day';
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + name));
+  document.querySelectorAll('.tabs a').forEach(a => a.classList.toggle('active', a.dataset.page === name));
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+}
+window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
+showPage(location.hash.slice(1));
 
 const epochDay = (y, m, d) => Math.round(Date.UTC(y, m, d) / 86400000);
 const fromEpochDay = n => new Date(n * 86400000);
@@ -563,40 +680,77 @@ function dailyIndex(days, metric) {
   return { lo, hi, raw, smooth };
 }
 
-function drawAnomaly() {
-  if (!lastAnom) return;
-  const { loc, days, metric, metricName, b0, b1, baseLabel } = lastAnom;
-  const year = +$('ay').value, m0 = +$('am0').value, m1 = Math.max(m0, +$('am1').value), k = +$('ak').value;
-  const zmode = document.querySelector('input[name=aunit]:checked').value === 'z';
-  const idx = lastAnom.idx || (lastAnom.idx = dailyIndex(days, metric));
-  const POOL = 3;   // pool ±3 calendar days of baseline years for a steadier climatology
+// Climatology for one calendar day at smoothing k: every baseline year's k-day mean, pooled over ±POOL calendar days.
+// Cached per (k, month, day) since it's identical for every target year; the target year is excluded at use time.
+function climatology(mo, da, k) {
+  const A = lastAnom, key = `${k}:${mo}-${da}`;
+  if (A.clim[key]) return A.clim[key];
+  const POOL = 3;
+  const out = [];
+  for (const y of A.baseYrs) { const c = epochDay(y, mo, da); for (let j = -POOL; j <= POOL; j++) { const v = A.idx.smooth(c + j, k); if (v != null) out.push([y, v]); } }
+  return A.clim[key] = out;
+}
 
-  const yearsAvail = []; for (const d of days.keys()) yearsAvail.push(+d.slice(0, 4));
-  const yMin = Math.min(...yearsAvail), yMax = Math.max(...yearsAvail);
-  const baseYrs = []; for (let y = Math.max(yMin, b0); y <= Math.min(yMax, b1); y++) if (y !== year) baseYrs.push(y);
-
+function computeAnomaly(year, m0, m1, k) {
+  const idx = lastAnom.idx;
   const todayN = epochDay(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
   const start = epochDay(year, m0, 1), end = Math.min(epochDay(year, m1 + 1, 0), todayN);
   const pts = [];
   for (let n = start; n <= end; n++) {
     const d = fromEpochDay(n), mo = d.getUTCMonth(), da = d.getUTCDate();
     const actual = idx.smooth(n, k);
-    const clim = [];
-    for (const y of baseYrs) { const c = epochDay(y, mo, da); for (let j = -POOL; j <= POOL; j++) { const v = idx.smooth(c + j, k); if (v != null) clim.push(v); } }
-    if (actual == null || clim.length < 20) { pts.push({ n, d, actual, mean: null }); continue; }
-    const mean = clim.reduce((a, b) => a + b, 0) / clim.length;
-    const sd = Math.sqrt(clim.reduce((a, b) => a + (b - mean) ** 2, 0) / (clim.length - 1));
+    if (actual == null) continue;
+    let s1 = 0, s2 = 0, c = 0;
+    for (const [y, v] of climatology(mo, da, k)) { if (y === year) continue; s1 += v; s2 += v * v; c++; }
+    if (c < 20) continue;
+    const mean = s1 / c, sd = Math.sqrt(Math.max(0, (s2 - c * mean * mean) / (c - 1)));
     pts.push({ n, d, actual, mean, sd, anom: actual - mean, z: (actual - mean) / sd });
   }
-  const valid = pts.filter(p => p.mean != null);
-  if (valid.length < 2) { $('anom').innerHTML = `<p class="status err">No data for ${MONTHS[m0]}–${MONTHS[m1]} ${year}.</p>`; $('anomlegend').innerHTML = ''; return; }
+  return { year, start, end, valid: pts };
+}
 
-  const W = 880, H = 320, m = { t: 16, r: 44, b: 40, l: 48 };
+function drawAnomaly() {
+  if (!lastAnom) return;
+  const { metricName, baseLabel } = lastAnom;
+  const year = +$('ay').value, m0 = +$('am0').value, m1 = Math.max(m0, +$('am1').value), k = +$('ak').value;
+  const zmode = document.querySelector('input[name=aunit]:checked').value === 'z';
+  const main = computeAnomaly(year, m0, m1, k);
+  const pins = pinnedYears.filter(y => y !== year).map(y => computeAnomaly(y, m0, m1, k));
+
+  // One y-scale across the main chart and every pinned year, so they compare directly.
+  const all = [main, ...pins].flatMap(r => r.valid);
+  const val = p => zmode ? p.z : p.anom, sdOf = p => zmode ? 1 : p.sd;
+  const amax = all.length ? Math.max(...all.map(p => Math.abs(val(p))), ...all.map(p => 2 * sdOf(p))) : 3;
+  const lim = zmode ? Math.max(3, amax) + 0.3 : Math.ceil(amax) + 1;
+  const opts = { m0, m1, k, zmode, lim, metricName };
+
+  if (main.valid.length < 2) { $('anom').innerHTML = `<p class="status err">No data for ${MONTHS[m0]}–${MONTHS[m1]} ${year}.</p>`; $('anomlegend').innerHTML = ''; }
+  else {
+    $('anom').innerHTML = anomalySvg(main, opts, 320);
+    $('anomlegend').innerHTML = `
+      <span><i class="gradbar"></i> colder ← ${zmode ? 'σ' : '°F'} vs ${baseLabel} normal → warmer</span>
+      <span><i class="sw" style="background:rgb(var(--band));opacity:.3"></i> ±1σ / ±2σ of the ${k > 1 ? k + '-day mean' : 'daily value'}</span>
+      <span>${year}: ${anomalySummary(main)}</span>`;
+  }
+  $('pinned').innerHTML = pins.map(r => `
+    <div class="card">
+      <div class="pinhead"><strong>${r.year}</strong><span class="sum">${r.valid.length < 2 ? 'no data' : anomalySummary(r)}</span>
+        <button type="button" class="nav x" data-unpin="${r.year}" title="Unpin ${r.year}">×</button></div>
+      ${r.valid.length < 2 ? '' : anomalySvg(r, opts, 220)}
+    </div>`).join('');
+}
+
+function anomalySummary(r) {
+  const v = r.valid, nHot = v.filter(p => p.z > 1).length, nCold = v.filter(p => p.z < -1).length;
+  const meanAnom = v.reduce((a, p) => a + p.anom, 0) / v.length;
+  return `avg ${meanAnom >= 0 ? '+' : ''}${fmt1(meanAnom)}°F vs normal · ${nHot} day${nHot === 1 ? '' : 's'} above +1σ · ${nCold} below −1σ · ${v.length} days`;
+}
+
+function anomalySvg({ year, start, end, valid }, { m0, m1, k, zmode, lim, metricName }, H) {
+  const W = 880, m = { t: 16, r: 44, b: 40, l: 48 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
   const val = p => zmode ? p.z : p.anom;
   const sdOf = p => zmode ? 1 : p.sd;
-  const amax = Math.max(...valid.map(p => Math.abs(val(p))), ...valid.map(p => 2 * sdOf(p)));
-  const lim = zmode ? Math.max(3, amax) + 0.3 : Math.ceil(amax) + 1;
   const x = n => m.l + (n - start) / (end - start + 1) * iw;
   const bw = iw / (end - start + 1);
   const y = v => m.t + ih / 2 - v / lim * ih / 2;
@@ -646,15 +800,8 @@ function drawAnomaly() {
     s += `<text class="alabel" x="${px}" y="${py}" text-anchor="${anchor}">${fmtD(p.d)}: ${p.anom >= 0 ? '+' : ''}${fmt1(p.anom)}° (${p.z >= 0 ? '+' : ''}${p.z.toFixed(1)}σ)</text>`;
   }
 
-  s += `<line class="xhair" id="xhair2" x1="0" x2="0" y1="${m.t}" y2="${m.t + ih}"/>`;
-  s += '</svg>';
-  $('anom').innerHTML = s;
-
-  const nHot = valid.filter(p => p.z > 1).length, nCold = valid.filter(p => p.z < -1).length;
-  $('anomlegend').innerHTML = `
-    <span><i class="gradbar"></i> colder ← ${zmode ? 'σ' : '°F'} vs ${baseLabel} normal → warmer</span>
-    <span><i class="sw" style="background:rgb(var(--band));opacity:.3"></i> ±1σ / ±2σ of the ${k > 1 ? k + '-day mean' : 'daily value'}</span>
-    <span>${nHot} day${nHot === 1 ? '' : 's'} above +1σ · ${nCold} below −1σ · ${valid.length} days shown</span>`;
+  s += `<line class="xhair" x1="0" x2="0" y1="${m.t}" y2="${m.t + ih}"/>`;
+  return s + '</svg>';
 }
 
 // Blue (cold) – neutral gray – red (hot); saturates at |z| = 2.5. Reads the theme tokens so dark mode gets its own steps.
