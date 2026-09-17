@@ -150,7 +150,7 @@
     <div class="card">
       <div id="chart"></div>
       <div class="legend">
-        <span><i class="sw" style="background:var(--series)"></i> Years (count per 2°F bin)</span>
+        <span><i class="sw" style="background:var(--series)"></i> Years (count per 1°F bin)</span>
         <span><i class="sw" style="background:rgb(var(--band));opacity:.35"></i> ±1σ</span>
         <span><i class="sw" style="background:rgb(var(--band));opacity:.18"></i> ±2σ</span>
         <span><i class="sw" style="background:rgb(var(--band));opacity:.08"></i> ±3σ</span>
@@ -411,7 +411,7 @@ function rangeTicks(lo, hi, step) {
 function drawHistogram(samples, { mean, sd, today, metricName }) {
   const W = 880, H = 340, m = { t: 30, r: 20, b: 44, l: 44 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
-  const BIN = 2;
+  const BIN = 1;
 
   const vals = samples.map(s => s.value);
   let lo = Math.min(...vals, mean - 3 * sd, today ?? Infinity);
