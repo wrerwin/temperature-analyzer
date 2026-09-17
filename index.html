@@ -274,7 +274,8 @@ function setStatus(msg, err, sub) {
 
 async function loadZip(zip) {
   // A partial load (some source failed) is kept for re-rendering but refetched on the next explicit Look up.
-  if (cache.has(zip) && !cache.get(zip).warnings.length) return cache.get(zip);
+  // A load still waiting on the station record is reused as-is.
+  if (cache.has(zip) && (cache.get(zip).pending || !cache.get(zip).warnings.length)) return cache.get(zip);
 
   setStatus('Looking up zip code…');
   const g = await fetch(`https://api.zippopotam.us/us/${zip}`);
@@ -284,24 +285,44 @@ async function loadZip(zip) {
   const lat = +p.latitude, lon = +p.longitude;
   const place = `${p['place name']}, ${p['state abbreviation']}`;
 
-  setStatus(`Fetching daily history for ${place}… (ERA5 + NOAA station search; 10–20 s)`);
-  // Each source fails independently; we proceed with whatever loaded and report the rest.
-  const results = await Promise.allSettled([loadArchive(lat, lon), loadForecast(lat, lon), loadStation(lat, lon)]);
+  setStatus(`Fetching daily history for ${place}… (ERA5 first, then the NOAA station record)`);
+  // Each source fails independently. Open-Meteo is fast, so we render as soon as it lands and
+  // patch the station record in when (if) it arrives.
+  const stationP = loadStation(lat, lon);
+  const [ra, rf] = await Promise.allSettled([loadArchive(lat, lon), loadForecast(lat, lon)]);
   const warnings = [];
-  const take = (i, label, fallback) => {
-    if (results[i].status === 'fulfilled') return results[i].value;
-    const msg = results[i].reason && results[i].reason.message || String(results[i].reason);
-    warnings.push(`${label}: ${msg}`);
+  const take = (r, label, fallback) => {
+    if (r.status === 'fulfilled') return r.value;
+    warnings.push(`${label}: ${r.reason && r.reason.message || r.reason}`);
     return fallback;
   };
-  const era5 = take(0, 'ERA5 unavailable', new Map());
-  const forecast = take(1, 'Forecast unavailable', new Map());
-  const station = take(2, 'NOAA station unavailable', null);
-  if (!era5.size && !(station && station.days.size)) throw new Error('No history could be loaded. ' + warnings.join(' · '));
+  const era5 = take(ra, 'ERA5 unavailable', new Map());
+  const forecast = take(rf, 'Forecast unavailable', new Map());
 
-  const loc = { place, lat, lon, era5, forecast, station, warnings, merged: {} };
+  const loc = { place, lat, lon, era5, forecast, station: null, pending: true, warnings, merged: {} };
   cache.set(zip, loc);
+
+  stationP.then(st => { loc.station = st; }, err => { warnings.push(`NOAA station unavailable: ${err.message || err}`); })
+    .finally(() => {
+      loc.pending = false; loc.merged = {};
+      if ($('zip').value.trim() === zip) { try { render(loc); } catch (e) { setStatus(e.message, true); } }
+    });
+
+  if (!era5.size) {
+    // Nothing to show yet; wait for the station record instead.
+    await stationP.catch(() => {});
+    if (!(loc.station && loc.station.days.size)) throw new Error('No history could be loaded. ' + warnings.join(' · '));
+  }
   return loc;
+}
+
+// fetch with a hard timeout, so a stalled upstream becomes a warning instead of a frozen page.
+async function fetchT(url, ms, label) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try { return await fetch(url, { signal: ctl.signal }); }
+  catch (e) { throw new Error(e.name === 'AbortError' ? `${label} timed out after ${ms / 1000}s` : `${label}: ${e.message}`); }
+  finally { clearTimeout(timer); }
 }
 
 // Open-Meteo: daily max/min only (mean = (max+min)/2, same as the station data, and a lighter request).
@@ -316,7 +337,7 @@ function ingestOpenMeteo(j, src) {
   return days;
 }
 async function omFetch(url, label) {
-  const r = await fetch(url);
+  const r = await fetchT(url, 30000, label);
   if (r.status === 429) throw new Error(`${label} rate limit reached (Open-Meteo 429) — try again in a few minutes`);
   if (!r.ok) throw new Error(`${label} request failed (${r.status})`);
   return r.json();
@@ -335,7 +356,7 @@ async function loadForecast(lat, lon) {
 async function loadStation(lat, lon) {
   const box = 0.5;
   const bbox = `${(lat + box).toFixed(3)},${(lon - box).toFixed(3)},${(lat - box).toFixed(3)},${(lon + box).toFixed(3)}`;
-  const s = await fetch(`https://www.ncei.noaa.gov/access/services/search/v1/data?dataset=daily-summaries&bbox=${bbox}&dataTypes=TMAX&limit=500`);
+  const s = await fetchT(`https://www.ncei.noaa.gov/access/services/search/v1/data?dataset=daily-summaries&bbox=${bbox}&dataTypes=TMAX&limit=500`, 30000, 'NCEI station search');
   if (!s.ok) throw new Error(`NCEI station search failed (${s.status})`);
   const sj = await s.json();
 
@@ -357,16 +378,35 @@ async function loadStation(lat, lon) {
   cands.sort((a, b) => b.score - a.score);
   const best = cands[0];
 
-  const d = await fetch(`https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=${best.id}&startDate=${best.startDate}&endDate=${iso(new Date())}&dataTypes=TMAX,TMIN&format=json&units=standard`);
-  if (!d.ok) throw new Error(`NCEI data request failed (${d.status})`);
-  const rows = await d.json();
-  const days = new Map();
-  for (const r of rows) {
-    const max = r.TMAX === undefined || r.TMAX === '' ? null : +r.TMAX;
-    const min = r.TMIN === undefined || r.TMIN === '' ? null : +r.TMIN;
-    if (max == null && min == null) continue;
-    days.set(r.DATE, { max, min, mean: max != null && min != null ? (max + min) / 2 : null, src: 'station' });
+  // NCEI throttles per connection, so a 130-year record is fetched as parallel ~25-year chunks (CSV: half the bytes of JSON).
+  const endY = new Date().getFullYear(), chunks = [];
+  for (let y = best.start; y <= endY; y += 25) {
+    const s = y === best.start ? best.startDate : `${y}-01-01`;
+    const e = y + 24 >= endY ? iso(new Date()) : `${y + 24}-12-31`;
+    chunks.push(`https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=${best.id}&startDate=${s}&endDate=${e}&dataTypes=TMAX,TMIN&format=csv&units=standard`);
   }
+  const texts = await Promise.all(chunks.map(async u => {
+    const d = await fetchT(u, 240000, `NCEI record for ${best.name}`);
+    if (!d.ok) throw new Error(`NCEI data request failed (${d.status})`);
+    return d.text();
+  }));
+
+  const days = new Map();
+  for (const text of texts) {
+    const lines = text.split('\n');
+    const head = lines[0].replace(/"/g, '').trim().split(',');
+    const iDate = head.indexOf('DATE'), iMax = head.indexOf('TMAX'), iMin = head.indexOf('TMIN');
+    if (iDate < 0) continue;   // empty chunk
+    for (let i = 1; i < lines.length; i++) {
+      const c = lines[i].replace(/"/g, '').trim().split(',');
+      if (c.length <= iDate) continue;
+      const max = iMax >= 0 && c[iMax] !== '' && c[iMax] !== undefined ? +c[iMax] : null;
+      const min = iMin >= 0 && c[iMin] !== '' && c[iMin] !== undefined ? +c[iMin] : null;
+      if (max == null && min == null) continue;
+      days.set(c[iDate], { max, min, mean: max != null && min != null ? (max + min) / 2 : null, src: 'station' });
+    }
+  }
+  if (!days.size) throw new Error(`NCEI returned no temperature rows for ${best.name}`);
   return { ...best, days };
 }
 
@@ -447,6 +487,7 @@ function render(loc) {
   if (mode === 'longest') {
     sub += loc.station
       ? ` Station: ${loc.station.name} (${loc.station.id}), ${loc.station.dist.toFixed(0)} mi away, ${loc.station.start}–${loc.station.end}, ${loc.station.coverage.toFixed(0)}% coverage.`
+      : loc.pending ? ' ⏳ NOAA station record still loading (NCEI is sometimes slow; up to a minute or two) — showing ERA5 for now.'
       : ' No long-record NOAA station found nearby; using ERA5 only.';
   }
   if (loc.warnings.length) sub += ' ⚠ ' + loc.warnings.join(' · ') + '.';
