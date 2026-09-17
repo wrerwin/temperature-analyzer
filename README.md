@@ -8,6 +8,11 @@ against every year back to 1940 for the same calendar day.
 - z-score, percentile, and a plain-English verdict ("within 1σ of normal — typical")
 - Year-by-year series over the full record with a temperature / z-score toggle and a linear
   trend line; years outside the baseline are drawn hollow
+- **Hot and cold spells** panel: pick a year and month range, and see the smoothed
+  (1 / 7 / 14 / 30-day) anomaly vs. the baseline day by day, colored blue → gray → red by
+  z-score, with ±1σ / ±2σ bands and the biggest warm and cold spells labeled. The baseline
+  years are smoothed the same way before computing σ, so the bands are honest at every
+  smoothing level.
 - History source toggle: longest available (NOAA station record back to the 1800s where one
   exists, ERA5 filling gaps) or ERA5 reanalysis only (1940+)
 - Optional ±3 / ±7 day window to widen the sample
