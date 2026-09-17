@@ -243,6 +243,8 @@ const fmt1 = x => (Math.round(x * 10) / 10).toFixed(1);
 const SRC_LABEL = { station: 'NOAA station', era5: 'ERA5', forecast: 'forecast' };
 
 $('date').value = iso(new Date());
+// Don't let page scrolling spin number inputs (year / baseline fields).
+document.querySelectorAll('input[type=number]').forEach(i => i.addEventListener('wheel', () => i.blur()));
 
 $('f').addEventListener('submit', async e => {
   e.preventDefault();
