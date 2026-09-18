@@ -11,18 +11,26 @@ against every year back to 1940 for the same calendar day.
   trend line; years outside the baseline are drawn hollow
 - Optional ±3 / ±7 day window to widen the sample; full per-year table with data source per row
 
-**Year page**
-- Pick a year (◀ ▶ to step through) and month range, and see the smoothed
-  (1 / 7 / 14 / 30-day) anomaly vs. the baseline day by day, colored blue → gray → red by
-  z-score, with ±1σ / ±2σ bands and the biggest warm and cold spells labeled. The baseline
-  years are smoothed the same way before computing σ, so the bands are honest at every
-  smoothing level.
+**Year page** (landing)
+- Pick a year (◀ ▶ to step through) and month range. In °F mode the baseline normal is drawn
+  as a seasonal curve with ±1σ / ±2σ bands, and each day's bar runs from the normal to the
+  actual (1 / 7 / 14 / 30-day smoothed) temperature, colored blue → gray → red by z-score.
+  σ mode shows the same as a flat anomaly. Biggest warm and cold spells are labeled. The
+  baseline years are smoothed the same way before computing σ, so the bands are honest at
+  every smoothing level.
 - **Pin years** to stack them for comparison on a shared scale.
 
+**Decades page**
+- For every year in the record: days hotter than +1σ / +2σ / +3σ (up, reds) and colder than
+  −1σ / −2σ / −3σ (down, blues), counted separately so they can't cancel. Decade-average
+  lines and a decade table (days per year in each band, hot − cold, mean anomaly). Each year
+  is compared leave-one-out against the baseline climatology.
+
 **Data**
-- History source: ERA5 reanalysis (1940+, default, loads in a couple of seconds) or the
-  longest available record (nearest NOAA station back to the 1800s where one exists, ERA5
-  filling gaps; fetched on demand, can take a minute when NCEI is slow)
+- History source: longest available (default — nearest NOAA station back to the 1800s where
+  one exists, ERA5 filling gaps) or ERA5 reanalysis only (1940+). ERA5 loads in a couple of
+  seconds and renders first; the station record follows (one-time download, can take a
+  minute when NCEI is slow). If ERA5 is unavailable the station record is used on its own.
 - Records are cached in the browser (localStorage); revisits only fetch the last two weeks
 
 ## Running it

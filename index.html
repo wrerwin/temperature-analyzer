@@ -169,8 +169,8 @@
     </label>
     <label>History source
       <select id="source">
-        <option value="era5">ERA5 reanalysis (1940+)</option>
         <option value="longest">Longest (NOAA station + ERA5 fill)</option>
+        <option value="era5">ERA5 reanalysis only (1940+)</option>
       </select>
     </label>
     <label>Baseline years
@@ -186,8 +186,9 @@
   <div class="status" id="status"></div>
   <div id="out" hidden>
     <nav class="tabs" role="tablist">
-      <a href="#day" data-page="day" role="tab">Day</a>
       <a href="#year" data-page="year" role="tab">Year</a>
+      <a href="#day" data-page="day" role="tab">Day</a>
+      <a href="#decades" data-page="decades" role="tab">Decades</a>
     </nav>
     <section id="page-day" class="page">
     <div class="card">
@@ -256,6 +257,31 @@
       <div class="legend" id="anomlegend"></div>
     </div>
     <div id="pinned"></div>
+    </section>
+
+    <section id="page-decades" class="page">
+    <div class="card">
+      <div class="panelhead">
+        <strong>Days beyond the norm, every year</strong>
+        <div class="ctl">
+          <label>Smoothing
+            <select id="dk">
+              <option value="1" selected>None (daily)</option>
+              <option value="7">7-day</option>
+              <option value="14">14-day</option>
+              <option value="30">30-day</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <p class="sub" style="margin:0 0 10px">For each year, how many days were hotter than +1σ / +2σ / +3σ (up, reds) and how many colder than −1σ / −2σ / −3σ (down, blues) relative to the baseline normal for that calendar day. Hot and cold are counted separately so they can't cancel. Lines are decade averages.</p>
+      <div id="dec"></div>
+      <div class="legend" id="declegend"></div>
+    </div>
+    <div class="card">
+      <strong>Decade averages (days per year)</strong>
+      <div id="dectable"></div>
+    </div>
     </section>
     <p class="foot">Station history: NOAA GHCN-Daily via NCEI (the nearest station within ~35 mi with the longest well-covered record; daily mean = (high+low)/2; lags ~3 days). Reanalysis: ERA5 via Open-Meteo archive (1940–present, ~5 day lag). Recent days and today: Open-Meteo forecast API. Geocoding: zippopotam.us. Today's high may still rise until evening.</p>
   </div>
@@ -622,9 +648,10 @@ function render(loc) {
 
   if (!$('ay').value) $('ay').value = selYear;
   const baseYrs = []; for (let y = Math.max(firstYear, b0); y <= Math.min(lastYear + 1, b1); y++) baseYrs.push(y);
-  lastAnom = { metricName, baseLabel, idx: dailyIndex(days, metric), baseYrs, clim: {} };
+  lastAnom = { metricName, baseLabel, idx: dailyIndex(days, metric), baseYrs, clim: {}, firstYear, lastYear };
   $('ay').min = firstYear; $('ay').max = new Date().getFullYear();
   drawAnomaly();
+  drawDecades();
 
   drawTable(samples, today, selYear, selIso, baseYears, todayRec && todayRec.src[metric]);
   $('out').hidden = false;
@@ -654,7 +681,7 @@ $('pinned').addEventListener('click', e => {
 
 // ---------- Pages (Day / Year) ----------
 function showPage(name) {
-  if (!['day', 'year'].includes(name)) name = 'day';
+  if (!['day', 'year', 'decades'].includes(name)) name = 'year';
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + name));
   document.querySelectorAll('.tabs a').forEach(a => a.classList.toggle('active', a.dataset.page === name));
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
@@ -681,15 +708,21 @@ function dailyIndex(days, metric) {
   return { lo, hi, raw, smooth };
 }
 
-// Climatology for one calendar day at smoothing k: every baseline year's k-day mean, pooled over ±POOL calendar days.
-// Cached per (k, month, day) since it's identical for every target year; the target year is excluded at use time.
+// Climatology for one calendar day at smoothing k: every baseline year's k-day mean, pooled over ±POOL calendar days
+// (a wider pool for unsmoothed data keeps the normal curve smooth). Cached per (k, month, day) as running sums, with
+// each year's own contribution kept separately so any target year can be excluded (leave-one-out) in O(1).
 function climatology(mo, da, k) {
   const A = lastAnom, key = `${k}:${mo}-${da}`;
   if (A.clim[key]) return A.clim[key];
-  const POOL = 3;
-  const out = [];
-  for (const y of A.baseYrs) { const c = epochDay(y, mo, da); for (let j = -POOL; j <= POOL; j++) { const v = A.idx.smooth(c + j, k); if (v != null) out.push([y, v]); } }
-  return A.clim[key] = out;
+  const POOL = k === 1 ? 7 : 3;
+  const tot = { s1: 0, s2: 0, c: 0 }, byYear = new Map();
+  for (const y of A.baseYrs) {
+    const c = epochDay(y, mo, da);
+    let s1 = 0, s2 = 0, n = 0;
+    for (let j = -POOL; j <= POOL; j++) { const v = A.idx.smooth(c + j, k); if (v != null) { s1 += v; s2 += v * v; n++; } }
+    if (n) { byYear.set(y, { s1, s2, c: n }); tot.s1 += s1; tot.s2 += s2; tot.c += n; }
+  }
+  return A.clim[key] = { tot, byYear };
 }
 
 function computeAnomaly(year, m0, m1, k) {
@@ -701,10 +734,13 @@ function computeAnomaly(year, m0, m1, k) {
     const d = fromEpochDay(n), mo = d.getUTCMonth(), da = d.getUTCDate();
     const actual = idx.smooth(n, k);
     if (actual == null) continue;
-    let s1 = 0, s2 = 0, c = 0;
-    for (const [y, v] of climatology(mo, da, k)) { if (y === year) continue; s1 += v; s2 += v * v; c++; }
+    const { tot, byYear } = climatology(mo, da, k);
+    const own = byYear.get(year) || { s1: 0, s2: 0, c: 0 };
+    const c = tot.c - own.c;
     if (c < 20) continue;
+    const s1 = tot.s1 - own.s1, s2 = tot.s2 - own.s2;
     const mean = s1 / c, sd = Math.sqrt(Math.max(0, (s2 - c * mean * mean) / (c - 1)));
+    if (!(sd > 0)) continue;
     pts.push({ n, d, actual, mean, sd, anom: actual - mean, z: (actual - mean) / sd });
   }
   return { year, start, end, valid: pts };
@@ -719,17 +755,23 @@ function drawAnomaly() {
   const pins = pinnedYears.filter(y => y !== year).map(y => computeAnomaly(y, m0, m1, k));
 
   // One y-scale across the main chart and every pinned year, so they compare directly.
+  // °F mode: actual temperature axis (normal curve + bands + bars from normal to actual). σ mode: flat anomaly axis.
   const all = [main, ...pins].flatMap(r => r.valid);
-  const val = p => zmode ? p.z : p.anom, sdOf = p => zmode ? 1 : p.sd;
-  const amax = all.length ? Math.max(...all.map(p => Math.abs(val(p))), ...all.map(p => 2 * sdOf(p))) : 3;
-  const lim = zmode ? Math.max(3, amax) + 0.3 : Math.ceil(amax) + 1;
-  const opts = { m0, m1, k, zmode, lim, metricName };
+  let lo, hi;
+  if (zmode) { const a = all.length ? Math.max(3, ...all.map(p => Math.abs(p.z))) + 0.3 : 3.3; lo = -a; hi = a; }
+  else {
+    lo = all.length ? Math.min(...all.map(p => Math.min(p.actual, p.mean - 2 * p.sd))) : 0;
+    hi = all.length ? Math.max(...all.map(p => Math.max(p.actual, p.mean + 2 * p.sd))) : 100;
+    lo = Math.floor(lo / 5) * 5 - 2; hi = Math.ceil(hi / 5) * 5 + 2;
+  }
+  const opts = { m0, m1, k, zmode, lo, hi, metricName };
 
   if (main.valid.length < 2) { $('anom').innerHTML = `<p class="status err">No data for ${MONTHS[m0]}–${MONTHS[m1]} ${year}.</p>`; $('anomlegend').innerHTML = ''; }
   else {
-    $('anom').innerHTML = anomalySvg(main, opts, 320);
+    $('anom').innerHTML = anomalySvg(main, opts, 340);
     $('anomlegend').innerHTML = `
-      <span><i class="gradbar"></i> colder ← ${zmode ? 'σ' : '°F'} vs ${baseLabel} normal → warmer</span>
+      <span><i class="gradbar"></i> colder ← ${zmode ? 'σ from' : ''} ${baseLabel} normal → warmer</span>
+      ${zmode ? '' : `<span><i class="sw" style="background:var(--ink-2);height:2px;border-radius:0"></i> Normal ${metricName} (baseline mean)</span>`}
       <span><i class="sw" style="background:rgb(var(--band));opacity:.3"></i> ±1σ / ±2σ of the ${k > 1 ? k + '-day mean' : 'daily value'}</span>
       <span>${year}: ${anomalySummary(main)}</span>`;
   }
@@ -747,41 +789,46 @@ function anomalySummary(r) {
   return `avg ${meanAnom >= 0 ? '+' : ''}${fmt1(meanAnom)}°F vs normal · ${nHot} day${nHot === 1 ? '' : 's'} above +1σ · ${nCold} below −1σ · ${v.length} days`;
 }
 
-function anomalySvg({ year, start, end, valid }, { m0, m1, k, zmode, lim, metricName }, H) {
+function anomalySvg({ year, start, end, valid }, { m0, m1, k, zmode, lo, hi, metricName }, H) {
   const W = 880, m = { t: 16, r: 44, b: 40, l: 48 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
-  const val = p => zmode ? p.z : p.anom;
+  // In σ mode everything is relative to a flat zero; in °F mode the "zero" is the seasonal normal curve.
+  const val = p => zmode ? p.z : p.actual;
+  const base = p => zmode ? 0 : p.mean;
   const sdOf = p => zmode ? 1 : p.sd;
   const x = n => m.l + (n - start) / (end - start + 1) * iw;
   const bw = iw / (end - start + 1);
-  const y = v => m.t + ih / 2 - v / lim * ih / 2;
+  const y = v => m.t + ih - (v - lo) / (hi - lo) * ih;
 
-  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Smoothed ${metricName} anomaly vs baseline, ${year}">`;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${zmode ? 'Anomaly' : 'Temperature'} vs baseline normal, ${year}">`;
 
-  // ±1σ / ±2σ bands (curves in °F mode, flat in σ mode)
+  // ±1σ / ±2σ bands around the normal (curves in °F mode, flat in σ mode)
   for (const kk of [2, 1]) {
-    const top = valid.map(p => `${x(p.n).toFixed(1)},${y(kk * sdOf(p)).toFixed(1)}`);
-    const bot = valid.map(p => `${(x(p.n) + bw).toFixed(1)},${y(-kk * sdOf(p)).toFixed(1)}`).reverse();
+    const top = valid.map(p => `${x(p.n).toFixed(1)},${y(base(p) + kk * sdOf(p)).toFixed(1)}`);
+    const bot = valid.map(p => `${(x(p.n) + bw).toFixed(1)},${y(base(p) - kk * sdOf(p)).toFixed(1)}`).reverse();
     s += `<polygon class="aband" opacity="${kk === 2 ? 0.08 : 0.12}" points="${top.join(' ')} ${bot.join(' ')}"/>`;
   }
-  for (const kk of [-2, -1, 1, 2]) s += `<text class="sigmalbl" x="${W - m.r + 16}" y="${y(zmode ? kk : kk * valid[Math.floor(valid.length / 2)].sd) + 4}">${kk > 0 ? '+' : ''}${kk}σ</text>`;
+  const last = valid[valid.length - 1];
+  for (const kk of [-2, -1, 1, 2]) s += `<text class="sigmalbl" x="${W - m.r + 16}" y="${y(base(last) + kk * sdOf(last)) + 4}">${kk > 0 ? '+' : ''}${kk}σ</text>`;
 
   // y ticks
   s += '<g class="grid">';
-  const step = zmode ? 1 : lim > 12 ? 5 : lim > 6 ? 2 : 1;
-  for (let t = -Math.floor(lim / step) * step; t <= lim; t += step)
-    s += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}"/><text class="tick" x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${t > 0 ? '+' : ''}${t}${zmode ? 'σ' : '°'}</text>`;
+  const span = hi - lo, step = zmode ? 1 : span > 60 ? 10 : span > 25 ? 5 : 2;
+  for (let t = Math.ceil(lo / step) * step; t <= hi; t += step)
+    s += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}"/><text class="tick" x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${zmode && t > 0 ? '+' : ''}${t}${zmode ? 'σ' : '°'}</text>`;
   s += '</g>';
-  s += `<line class="zero" x1="${m.l}" x2="${W - m.r}" y1="${y(0)}" y2="${y(0)}"/>`;
 
-  // bars, colored by z on a blue–gray–red diverging ramp
+  // bars from the normal to the actual, colored by z on a blue–gray–red diverging ramp
   const fmtD = d => `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
   for (const p of valid) {
-    const v = val(p), top = Math.min(y(0), y(v)), h = Math.abs(y(v) - y(0));
+    const y0 = y(base(p)), y1 = y(val(p)), top = Math.min(y0, y1), h = Math.abs(y1 - y0);
     const tip = `${fmtD(p.d)}, ${year}${k > 1 ? ` (${k}-day avg)` : ''}&#10;${metricName} ${fmt1(p.actual)}°F · normal ${fmt1(p.mean)}°F&#10;${p.anom >= 0 ? '+' : ''}${fmt1(p.anom)}°F (${p.z >= 0 ? '+' : ''}${p.z.toFixed(2)}σ)`;
     s += `<rect class="abar" x="${x(p.n).toFixed(1)}" y="${top.toFixed(1)}" width="${(bw + 0.3).toFixed(2)}" height="${Math.max(h, 0.5).toFixed(1)}" fill="${divergingColor(p.z)}"/>`;
     s += `<rect class="hit" x="${x(p.n).toFixed(1)}" y="${m.t}" width="${bw.toFixed(2)}" height="${ih}" data-tip="${tip}" data-x="${(x(p.n) + bw / 2).toFixed(1)}"/>`;
   }
+  // the normal itself: flat zero line in σ mode, seasonal curve in °F mode
+  if (zmode) s += `<line class="zero" x1="${m.l}" x2="${W - m.r}" y1="${y(0)}" y2="${y(0)}"/>`;
+  else s += `<path class="zero" fill="none" d="${valid.map((p, i) => (i ? 'L' : 'M') + (x(p.n) + bw / 2).toFixed(1) + ' ' + y(p.mean).toFixed(1)).join('')}"/>`;
 
   // x axis: month boundaries
   s += `<g class="axis"><line x1="${m.l}" x2="${W - m.r}" y1="${m.t + ih}" y2="${m.t + ih}"/></g>`;
@@ -797,12 +844,109 @@ function anomalySvg({ year, start, end, valid }, { m0, m1, k, zmode, lim, metric
   for (const [p, lbl] of [[hot, 'hot'], [cold, 'cold']]) {
     if (Math.abs(p.z) < 1) continue;
     const px = x(p.n) + bw / 2, anchor = px > W * 0.8 ? 'end' : px < W * 0.2 ? 'start' : 'middle';
-    const py = val(p) > 0 ? y(val(p)) - 6 : y(val(p)) + 14;
+    const py = p.z > 0 ? y(val(p)) - 6 : y(val(p)) + 14;
     s += `<text class="alabel" x="${px}" y="${py}" text-anchor="${anchor}">${fmtD(p.d)}: ${p.anom >= 0 ? '+' : ''}${fmt1(p.anom)}° (${p.z >= 0 ? '+' : ''}${p.z.toFixed(1)}σ)</text>`;
   }
 
   s += `<line class="xhair" x1="0" x2="0" y1="${m.t}" y2="${m.t + ih}"/>`;
   return s + '</svg>';
+}
+
+// ---------- Decades page ----------
+$('dk').addEventListener('change', drawDecades);
+
+function drawDecades() {
+  if (!lastAnom) return;
+  const k = +$('dk').value;
+  const { firstYear, baseLabel, metricName } = lastAnom;
+  const thisYear = new Date().getFullYear();
+
+  // Per year: days in each σ band, hot and cold counted separately.
+  const rows = [];
+  for (let y = firstYear; y <= thisYear; y++) {
+    const r = computeAnomaly(y, 0, 11, k);
+    if (r.valid.length < 30) continue;
+    const c = { year: y, n: r.valid.length, complete: r.valid.length >= 300, hot: [0, 0, 0], cold: [0, 0, 0], meanAnom: 0 };
+    for (const p of r.valid) {
+      c.meanAnom += p.anom;
+      if (p.z > 1) c.hot[p.z > 3 ? 2 : p.z > 2 ? 1 : 0]++;
+      else if (p.z < -1) c.cold[p.z < -3 ? 2 : p.z < -2 ? 1 : 0]++;
+    }
+    c.meanAnom /= c.n;
+    c.hotAll = c.hot[0] + c.hot[1] + c.hot[2]; c.coldAll = c.cold[0] + c.cold[1] + c.cold[2];
+    rows.push(c);
+  }
+  if (rows.length < 2) { $('dec').innerHTML = '<p class="status err">Not enough years.</p>'; $('dectable').innerHTML = ''; $('declegend').innerHTML = ''; return; }
+
+  // Decade averages over complete years only.
+  const decades = new Map();
+  for (const c of rows) {
+    if (!c.complete) continue;
+    const d = Math.floor(c.year / 10) * 10;
+    const g = decades.get(d) || { decade: d, years: 0, hot: [0, 0, 0], cold: [0, 0, 0], meanAnom: 0 };
+    g.years++; g.meanAnom += c.meanAnom;
+    for (let i = 0; i < 3; i++) { g.hot[i] += c.hot[i]; g.cold[i] += c.cold[i]; }
+    decades.set(d, g);
+  }
+  const decRows = [...decades.values()].map(g => ({
+    ...g, meanAnom: g.meanAnom / g.years,
+    hotGe: [0, 1, 2].map(i => g.hot.slice(i).reduce((a, b) => a + b, 0) / g.years),      // ≥1σ, ≥2σ, ≥3σ per year
+    coldGe: [0, 1, 2].map(i => g.cold.slice(i).reduce((a, b) => a + b, 0) / g.years),
+  }));
+
+  // Chart: diverging stacked bars per year, decade-average lines.
+  const W = 880, H = 380, m = { t: 16, r: 20, b: 40, l: 48 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const y0 = rows[0].year, y1 = rows[rows.length - 1].year;
+  const lim = Math.max(10, ...rows.map(c => Math.max(c.hotAll, c.coldAll))) * 1.08;
+  const x = yr => m.l + (yr - y0) / (y1 - y0 + 1) * iw, bw = iw / (y1 - y0 + 1);
+  const y = v => m.t + ih / 2 - v / lim * ih / 2;
+  const hotOp = [0.4, 0.7, 1], coldOp = [0.4, 0.7, 1];
+
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Days beyond ±1σ, ±2σ, ±3σ per year">`;
+  s += '<g class="grid">';
+  const step = lim > 120 ? 30 : lim > 60 ? 20 : lim > 30 ? 10 : 5;
+  for (let t = -Math.floor(lim / step) * step; t <= lim; t += step)
+    s += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}"/><text class="tick" x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${Math.abs(t)}</text>`;
+  s += '</g>';
+  s += `<text class="lbl" x="${m.l - 8}" y="${m.t + 4}" text-anchor="end">hot</text><text class="lbl" x="${m.l - 8}" y="${m.t + ih}" text-anchor="end">cold</text>`;
+
+  for (const c of rows) {
+    const bx = x(c.year) + 1, w = Math.max(bw - 2, 1), fade = c.complete ? '' : ' opacity="0.45"';
+    let acc = 0;
+    for (let i = 0; i < 3; i++) { if (!c.hot[i]) continue; s += `<rect x="${bx.toFixed(1)}" y="${y(acc + c.hot[i]).toFixed(1)}" width="${w.toFixed(1)}" height="${(y(acc) - y(acc + c.hot[i])).toFixed(1)}" fill="var(--hot)" opacity="${hotOp[i]}"${fade}/>`; acc += c.hot[i]; }
+    acc = 0;
+    for (let i = 0; i < 3; i++) { if (!c.cold[i]) continue; s += `<rect x="${bx.toFixed(1)}" y="${y(-acc).toFixed(1)}" width="${w.toFixed(1)}" height="${(y(-acc - c.cold[i]) - y(-acc)).toFixed(1)}" fill="var(--cold)" opacity="${coldOp[i]}"${fade}/>`; acc += c.cold[i]; }
+    const tip = `${c.year}${c.complete ? '' : ` (partial: ${c.n} days)`}&#10;hot: ${c.hotAll} days > +1σ (${c.hot[1] + c.hot[2]} > +2σ, ${c.hot[2]} > +3σ)&#10;cold: ${c.coldAll} days < −1σ (${c.cold[1] + c.cold[2]} < −2σ, ${c.cold[2]} < −3σ)&#10;avg ${c.meanAnom >= 0 ? '+' : ''}${fmt1(c.meanAnom)}°F vs normal`;
+    s += `<rect class="hit" x="${x(c.year).toFixed(1)}" y="${m.t}" width="${bw.toFixed(1)}" height="${ih}" data-tip="${tip}" data-x="${(x(c.year) + bw / 2).toFixed(1)}"/>`;
+  }
+  s += `<line class="zero" x1="${m.l}" x2="${W - m.r}" y1="${y(0)}" y2="${y(0)}"/>`;
+
+  // decade-average lines (≥1σ totals)
+  for (const g of decRows) {
+    const xa = x(Math.max(g.decade, y0)), xb = x(Math.min(g.decade + 9, y1)) + bw;
+    s += `<line x1="${xa}" x2="${xb}" y1="${y(g.hotGe[0])}" y2="${y(g.hotGe[0])}" stroke="var(--ink)" stroke-width="2.5"/>`;
+    s += `<line x1="${xa}" x2="${xb}" y1="${y(-g.coldGe[0])}" y2="${y(-g.coldGe[0])}" stroke="var(--ink)" stroke-width="2.5"/>`;
+  }
+
+  s += `<g class="axis"><line x1="${m.l}" x2="${W - m.r}" y1="${m.t + ih}" y2="${m.t + ih}"/></g>`;
+  for (let yr = Math.ceil(y0 / 10) * 10; yr <= y1; yr += 10)
+    s += `<text class="tick" x="${x(yr) + bw / 2}" y="${m.t + ih + 18}" text-anchor="middle">${yr}</text>`;
+  s += `<line class="xhair" x1="0" x2="0" y1="${m.t}" y2="${m.t + ih}"/></svg>`;
+  $('dec').innerHTML = s;
+
+  $('declegend').innerHTML = `
+    <span><i class="sw" style="background:var(--hot);opacity:.4"></i> +1–2σ <i class="sw" style="background:var(--hot);opacity:.7"></i> +2–3σ <i class="sw" style="background:var(--hot)"></i> &gt;+3σ</span>
+    <span><i class="sw" style="background:var(--cold);opacity:.4"></i> −1–2σ <i class="sw" style="background:var(--cold);opacity:.7"></i> −2–3σ <i class="sw" style="background:var(--cold)"></i> &lt;−3σ</span>
+    <span><i class="sw" style="background:var(--ink);height:2px;border-radius:0"></i> Decade average (days beyond ±1σ)</span>
+    <span>Daily ${metricName}${k > 1 ? `, ${k}-day mean` : ''} · baseline ${baseLabel} · faded = partial year</span>`;
+
+  let h = '<table><thead><tr><th>Decade</th><th>Years</th><th>&gt; +1σ</th><th>&gt; +2σ</th><th>&gt; +3σ</th><th>&lt; −1σ</th><th>&lt; −2σ</th><th>&lt; −3σ</th><th>Hot − cold</th><th>Avg anomaly</th></tr></thead><tbody>';
+  for (const g of decRows) {
+    const net = g.hotGe[0] - g.coldGe[0];
+    h += `<tr><td>${g.decade}s</td><td>${g.years}</td><td>${g.hotGe[0].toFixed(1)}</td><td>${g.hotGe[1].toFixed(1)}</td><td>${g.hotGe[2].toFixed(1)}</td><td>${g.coldGe[0].toFixed(1)}</td><td>${g.coldGe[1].toFixed(1)}</td><td>${g.coldGe[2].toFixed(1)}</td><td style="color:${net > 0 ? 'var(--hot)' : 'var(--cold)'}">${net >= 0 ? '+' : ''}${net.toFixed(1)}</td><td>${g.meanAnom >= 0 ? '+' : ''}${fmt1(g.meanAnom)}°F</td></tr>`;
+  }
+  $('dectable').innerHTML = h + '</tbody></table>';
 }
 
 // Blue (cold) – neutral gray – red (hot); saturates at |z| = 2.5. Reads the theme tokens so dark mode gets its own steps.
