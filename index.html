@@ -264,6 +264,13 @@
       <div class="panelhead">
         <strong>Days beyond the norm, every year</strong>
         <div class="ctl">
+          <label>Count days beyond
+            <select id="dt">
+              <option value="1">±1σ (all bands)</option>
+              <option value="2">±2σ only</option>
+              <option value="3">±3σ only</option>
+            </select>
+          </label>
           <label>Smoothing
             <select id="dk">
               <option value="1" selected>None (daily)</option>
@@ -274,7 +281,7 @@
           </label>
         </div>
       </div>
-      <p class="sub" style="margin:0 0 10px">For each year, how many days were hotter than +1σ / +2σ / +3σ (up, reds) and how many colder than −1σ / −2σ / −3σ (down, blues) relative to the baseline normal for that calendar day. Hot and cold are counted separately so they can't cancel. Lines are decade averages.</p>
+      <p class="sub" style="margin:0 0 10px">For each year, how many days were hotter than the chosen threshold (up, reds, shaded by band) and how many colder (down, blues) relative to the baseline normal for that calendar day. Hot and cold are counted separately so they can't cancel. Solid lines are decade averages; dashed lines are the linear trend over complete years.</p>
       <div id="dec"></div>
       <div class="legend" id="declegend"></div>
     </div>
@@ -854,10 +861,11 @@ function anomalySvg({ year, start, end, valid }, { m0, m1, k, zmode, lo, hi, met
 
 // ---------- Decades page ----------
 $('dk').addEventListener('change', drawDecades);
+$('dt').addEventListener('change', drawDecades);
 
 function drawDecades() {
   if (!lastAnom) return;
-  const k = +$('dk').value;
+  const k = +$('dk').value, T = +$('dt').value;   // T: lowest band index+1 to include (1 = all, 2 = ≥2σ, 3 = ≥3σ)
   const { firstYear, baseLabel, metricName } = lastAnom;
   const thisYear = new Date().getFullYear();
 
@@ -873,7 +881,7 @@ function drawDecades() {
       else if (p.z < -1) c.cold[p.z < -3 ? 2 : p.z < -2 ? 1 : 0]++;
     }
     c.meanAnom /= c.n;
-    c.hotAll = c.hot[0] + c.hot[1] + c.hot[2]; c.coldAll = c.cold[0] + c.cold[1] + c.cold[2];
+    c.hotAll = c.hot.slice(T - 1).reduce((a, b) => a + b, 0); c.coldAll = c.cold.slice(T - 1).reduce((a, b) => a + b, 0);
     rows.push(c);
   }
   if (rows.length < 2) { $('dec').innerHTML = '<p class="status err">Not enough years.</p>'; $('dectable').innerHTML = ''; $('declegend').innerHTML = ''; return; }
@@ -898,14 +906,24 @@ function drawDecades() {
   const W = 880, H = 380, m = { t: 16, r: 20, b: 40, l: 48 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
   const y0 = rows[0].year, y1 = rows[rows.length - 1].year;
-  const lim = Math.max(10, ...rows.map(c => Math.max(c.hotAll, c.coldAll))) * 1.08;
+  const lim = Math.max(T === 3 ? 2 : T === 2 ? 5 : 10, ...rows.map(c => Math.max(c.hotAll, c.coldAll))) * 1.08;
   const x = yr => m.l + (yr - y0) / (y1 - y0 + 1) * iw, bw = iw / (y1 - y0 + 1);
   const y = v => m.t + ih / 2 - v / lim * ih / 2;
   const hotOp = [0.4, 0.7, 1], coldOp = [0.4, 0.7, 1];
+  const bandLabel = ['1–2σ', '2–3σ', '>3σ'];
 
-  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Days beyond ±1σ, ±2σ, ±3σ per year">`;
+  // Linear trend over complete years, for hot and cold separately.
+  const fit = key => {
+    const pts = rows.filter(c => c.complete);
+    const n = pts.length, mx = pts.reduce((a, c) => a + c.year, 0) / n, my = pts.reduce((a, c) => a + c[key], 0) / n;
+    const slope = pts.reduce((a, c) => a + (c.year - mx) * (c[key] - my), 0) / pts.reduce((a, c) => a + (c.year - mx) ** 2, 0);
+    return { slope, at: yr => my + slope * (yr - mx) };
+  };
+  const hotFit = fit('hotAll'), coldFit = fit('coldAll');
+
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Days beyond ±${T}σ per year">`;
   s += '<g class="grid">';
-  const step = lim > 120 ? 30 : lim > 60 ? 20 : lim > 30 ? 10 : 5;
+  const step = lim > 120 ? 30 : lim > 60 ? 20 : lim > 30 ? 10 : lim > 12 ? 5 : lim > 6 ? 2 : 1;
   for (let t = -Math.floor(lim / step) * step; t <= lim; t += step)
     s += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}"/><text class="tick" x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${Math.abs(t)}</text>`;
   s += '</g>';
@@ -914,20 +932,23 @@ function drawDecades() {
   for (const c of rows) {
     const bx = x(c.year) + 1, w = Math.max(bw - 2, 1), fade = c.complete ? '' : ' opacity="0.45"';
     let acc = 0;
-    for (let i = 0; i < 3; i++) { if (!c.hot[i]) continue; s += `<rect x="${bx.toFixed(1)}" y="${y(acc + c.hot[i]).toFixed(1)}" width="${w.toFixed(1)}" height="${(y(acc) - y(acc + c.hot[i])).toFixed(1)}" fill="var(--hot)" opacity="${hotOp[i]}"${fade}/>`; acc += c.hot[i]; }
+    for (let i = T - 1; i < 3; i++) { if (!c.hot[i]) continue; s += `<rect x="${bx.toFixed(1)}" y="${y(acc + c.hot[i]).toFixed(1)}" width="${w.toFixed(1)}" height="${(y(acc) - y(acc + c.hot[i])).toFixed(1)}" fill="var(--hot)" opacity="${hotOp[i]}"${fade}/>`; acc += c.hot[i]; }
     acc = 0;
-    for (let i = 0; i < 3; i++) { if (!c.cold[i]) continue; s += `<rect x="${bx.toFixed(1)}" y="${y(-acc).toFixed(1)}" width="${w.toFixed(1)}" height="${(y(-acc - c.cold[i]) - y(-acc)).toFixed(1)}" fill="var(--cold)" opacity="${coldOp[i]}"${fade}/>`; acc += c.cold[i]; }
-    const tip = `${c.year}${c.complete ? '' : ` (partial: ${c.n} days)`}&#10;hot: ${c.hotAll} days > +1σ (${c.hot[1] + c.hot[2]} > +2σ, ${c.hot[2]} > +3σ)&#10;cold: ${c.coldAll} days < −1σ (${c.cold[1] + c.cold[2]} < −2σ, ${c.cold[2]} < −3σ)&#10;avg ${c.meanAnom >= 0 ? '+' : ''}${fmt1(c.meanAnom)}°F vs normal`;
+    for (let i = T - 1; i < 3; i++) { if (!c.cold[i]) continue; s += `<rect x="${bx.toFixed(1)}" y="${y(-acc).toFixed(1)}" width="${w.toFixed(1)}" height="${(y(-acc - c.cold[i]) - y(-acc)).toFixed(1)}" fill="var(--cold)" opacity="${coldOp[i]}"${fade}/>`; acc += c.cold[i]; }
+    const tip = `${c.year}${c.complete ? '' : ` (partial: ${c.n} days)`}&#10;hot: ${c.hot[0] + c.hot[1] + c.hot[2]} days > +1σ · ${c.hot[1] + c.hot[2]} > +2σ · ${c.hot[2]} > +3σ&#10;cold: ${c.cold[0] + c.cold[1] + c.cold[2]} days < −1σ · ${c.cold[1] + c.cold[2]} < −2σ · ${c.cold[2]} < −3σ&#10;avg ${c.meanAnom >= 0 ? '+' : ''}${fmt1(c.meanAnom)}°F vs normal`;
     s += `<rect class="hit" x="${x(c.year).toFixed(1)}" y="${m.t}" width="${bw.toFixed(1)}" height="${ih}" data-tip="${tip}" data-x="${(x(c.year) + bw / 2).toFixed(1)}"/>`;
   }
   s += `<line class="zero" x1="${m.l}" x2="${W - m.r}" y1="${y(0)}" y2="${y(0)}"/>`;
 
-  // decade-average lines (≥1σ totals)
+  // decade-average lines at the chosen threshold
   for (const g of decRows) {
     const xa = x(Math.max(g.decade, y0)), xb = x(Math.min(g.decade + 9, y1)) + bw;
-    s += `<line x1="${xa}" x2="${xb}" y1="${y(g.hotGe[0])}" y2="${y(g.hotGe[0])}" stroke="var(--ink)" stroke-width="2.5"/>`;
-    s += `<line x1="${xa}" x2="${xb}" y1="${y(-g.coldGe[0])}" y2="${y(-g.coldGe[0])}" stroke="var(--ink)" stroke-width="2.5"/>`;
+    s += `<line x1="${xa}" x2="${xb}" y1="${y(g.hotGe[T - 1])}" y2="${y(g.hotGe[T - 1])}" stroke="var(--ink)" stroke-width="2.5"/>`;
+    s += `<line x1="${xa}" x2="${xb}" y1="${y(-g.coldGe[T - 1])}" y2="${y(-g.coldGe[T - 1])}" stroke="var(--ink)" stroke-width="2.5"/>`;
   }
+  // trend lines
+  s += `<line class="strend" style="stroke:var(--hot);stroke-width:2" x1="${x(y0)}" x2="${x(y1) + bw}" y1="${y(hotFit.at(y0))}" y2="${y(hotFit.at(y1))}"/>`;
+  s += `<line class="strend" style="stroke:var(--cold);stroke-width:2" x1="${x(y0)}" x2="${x(y1) + bw}" y1="${y(-coldFit.at(y0))}" y2="${y(-coldFit.at(y1))}"/>`;
 
   s += `<g class="axis"><line x1="${m.l}" x2="${W - m.r}" y1="${m.t + ih}" y2="${m.t + ih}"/></g>`;
   for (let yr = Math.ceil(y0 / 10) * 10; yr <= y1; yr += 10)
@@ -935,10 +956,14 @@ function drawDecades() {
   s += `<line class="xhair" x1="0" x2="0" y1="${m.t}" y2="${m.t + ih}"/></svg>`;
   $('dec').innerHTML = s;
 
+  const sw = (v, op) => `<i class="sw" style="background:var(--${v});opacity:${op}"></i>`;
+  const hotSw = [0, 1, 2].filter(i => i >= T - 1).map(i => `${sw('hot', hotOp[i])} +${bandLabel[i]}`).join(' ');
+  const coldSw = [0, 1, 2].filter(i => i >= T - 1).map(i => `${sw('cold', coldOp[i])} −${bandLabel[i]}`).join(' ');
+  const perDec = f => `${f.slope * 10 >= 0 ? '+' : ''}${(f.slope * 10).toFixed(1)} days/decade`;
   $('declegend').innerHTML = `
-    <span><i class="sw" style="background:var(--hot);opacity:.4"></i> +1–2σ <i class="sw" style="background:var(--hot);opacity:.7"></i> +2–3σ <i class="sw" style="background:var(--hot)"></i> &gt;+3σ</span>
-    <span><i class="sw" style="background:var(--cold);opacity:.4"></i> −1–2σ <i class="sw" style="background:var(--cold);opacity:.7"></i> −2–3σ <i class="sw" style="background:var(--cold)"></i> &lt;−3σ</span>
-    <span><i class="sw" style="background:var(--ink);height:2px;border-radius:0"></i> Decade average (days beyond ±1σ)</span>
+    <span>${hotSw}</span><span>${coldSw}</span>
+    <span><i class="sw" style="background:var(--ink);height:2px;border-radius:0"></i> Decade average (days beyond ±${T}σ)</span>
+    <span><i class="sw" style="background:var(--hot);height:2px;border-radius:0"></i> Hot trend ${perDec(hotFit)} · <i class="sw" style="background:var(--cold);height:2px;border-radius:0"></i> Cold trend ${perDec(coldFit)}</span>
     <span>Daily ${metricName}${k > 1 ? `, ${k}-day mean` : ''} · baseline ${baseLabel} · faded = partial year</span>`;
 
   let h = '<table><thead><tr><th>Decade</th><th>Years</th><th>&gt; +1σ</th><th>&gt; +2σ</th><th>&gt; +3σ</th><th>&lt; −1σ</th><th>&lt; −2σ</th><th>&lt; −3σ</th><th>Hot − cold</th><th>Avg anomaly</th></tr></thead><tbody>';
