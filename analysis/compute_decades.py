@@ -8,8 +8,7 @@ This mirrors index.html exactly (dailyIndex / climatology / computeAnomaly / dra
     (±3 when k > 1); the target year is left out (leave-one-out) before mean/sd are taken
   * z = (actual - mean) / sd; a year needs ≥ 30 valid days to count and ≥ 300 to be "complete"
   * hot bands: z > 1, > 2, > 3; cold bands: z < -1, < -2, < -3; counted separately
-  * volatility: sd of the year's daily z around the year's own mean (spread) and the RMS day-to-day change in z
-    (swing); the page normalises both by the baseline-period average so 1.0 = baseline-typical
+  * the page derives the volatility index (rarity-weighted 1σ/2σ/3σ event counts) from these band counts
 
     python3 analysis/compute_decades.py                      # GHCN cache, baseline 1940–2000, no smoothing
     python3 analysis/compute_decades.py --source era5 --smooth 1,7
@@ -52,7 +51,7 @@ def smoother(raw, lo, k):
 
 
 def year_counts(raw, lo, k, base_years, first_year, last_year, today_n):
-    """Per year: [hot1, hot2, hot3, cold1, cold2, cold3, n_valid, mean_anomaly, spread, swing] (None if < 30 valid days)."""
+    """Per year: [hot1, hot2, hot3, cold1, cold2, cold3, n_valid, mean_anomaly] (None if < 30 valid days)."""
     smooth = smoother(raw, lo, k)
     pool = 7 if k == 1 else 3
     js = np.arange(-pool, pool + 1)
@@ -94,13 +93,9 @@ def year_counts(raw, lo, k, base_years, first_year, last_year, today_n):
             out.append(None); continue
         anom = actual[valid] - mean[valid]
         z = anom / sd[valid]
-        spread = float(np.sqrt(((z - z.mean()) ** 2).mean()))
-        vn = ns[valid]
-        consecutive = np.diff(vn) == 1
-        swing = float(np.sqrt((np.diff(z)[consecutive] ** 2).mean())) if consecutive.sum() >= 20 else None
         out.append([int((z > 1).sum() - (z > 2).sum()), int((z > 2).sum() - (z > 3).sum()), int((z > 3).sum()),
                     int((z < -1).sum() - (z < -2).sum()), int((z < -2).sum() - (z < -3).sum()), int((z < -3).sum()),
-                    n, round(float(anom.mean()), 1) + 0.0, round(spread, 3), None if swing is None else round(swing, 3)])
+                    n, round(float(anom.mean()), 1) + 0.0])
     return out
 
 
@@ -146,8 +141,8 @@ def main():
     out = {
         'meta': {'generated': datetime.now().isoformat(timespec='seconds'), 'source': SOURCES[a.source],
                  'baseline': [a.b0, a.b1], 'smooth': ks, 'locations': len(locs),
-                 'fields': ['hot1', 'hot2', 'hot3', 'cold1', 'cold2', 'cold3', 'n', 'anom', 'spread', 'swing'],
-                 'note': 'per location, per year: days with z in (1,2], (2,3], >3 (hot) and [-2,-1), [-3,-2), <-3 (cold); n valid days; mean anomaly °F; sd of daily z about the year mean; RMS day-to-day change in z'},
+                 'fields': ['hot1', 'hot2', 'hot3', 'cold1', 'cold2', 'cold3', 'n', 'anom'],
+                 'note': 'per location, per year: days with z in (1,2], (2,3], >3 (hot) and [-2,-1), [-3,-2), <-3 (cold); n valid days; mean anomaly °F'},
         'years': years, 'locations': locs, 'data': data,
     }
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
