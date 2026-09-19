@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Temperature Percentile</title>
+<title>Temperature Volatility Analysis</title>
 <style>
   :root {
     color-scheme: light;
@@ -47,6 +47,13 @@
   .sub { color: var(--ink-2); margin: 0 0 20px; }
 
   form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 20px; }
+  .opts { flex-basis: 100%; font-size: 13px; color: var(--ink-2); }
+  .opts summary { cursor: pointer; width: max-content; }
+  .opts .optrow { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-top: 8px; }
+  .hint { color: var(--muted); font-weight: 400; }
+  .methods { color: var(--ink-2); font-size: 13px; margin-top: 24px; }
+  .methods summary { cursor: pointer; color: var(--muted); }
+  .methods p { margin: 8px 0 0; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ink-2); }
   input, select, button {
     font: inherit; color: var(--ink); background: var(--surface);
@@ -132,10 +139,24 @@
   tr.today td { color: var(--today); font-weight: 600; }
   .foot { color: var(--muted); font-size: 12px; margin-top: 14px; }
 
-  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--axis); margin-bottom: 16px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--axis); margin-bottom: 16px; overflow-x: auto; }
+  @media (max-width: 480px) { .tabs a { padding: 8px 9px; font-size: 14px; } }
   .tabs a { padding: 8px 16px; color: var(--ink-2); text-decoration: none; font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px; }
   .tabs a.active { color: var(--series); border-bottom-color: var(--series); }
   .page { display: none; }
+  .gstate { fill: var(--grid); stroke: var(--surface); stroke-width: 1; }
+  .gdot { stroke: var(--surface); stroke-width: 1; cursor: pointer; }
+  .gdot:hover { stroke: var(--ink); stroke-width: 1.5; }
+  .gdot.none { fill: none; stroke: var(--axis); stroke-dasharray: 2 2; cursor: default; }
+  .gdot.partial { stroke-dasharray: 2 2; }
+  .vline { fill: none; stroke: var(--series); stroke-width: 1.5; stroke-linejoin: round; }
+  .vdot { fill: var(--series); stroke: var(--surface); stroke-width: 1; }
+  .vdot.out { fill: var(--surface); stroke: var(--series); }
+  .gbar { fill: var(--axis); }
+  .gbar.cur { fill: var(--series); }
+  .gcur { stroke: var(--series); stroke-width: 1.5; }
+  .gseq { height: 10px; width: 120px; border-radius: 3px; display: inline-block; }
+  #gstrip svg { cursor: ew-resize; }
   .page.active { display: block; }
   button.nav { background: var(--surface); color: var(--ink); border: 1px solid var(--axis); padding: 4px 8px; font-weight: 500; font-size: 13px; }
   button.nav:hover { border-color: var(--series); }
@@ -147,8 +168,8 @@
 </head>
 <body>
 <main>
-  <h1>How unusual is today's temperature?</h1>
-  <p class="sub">Enter a US zip code. <strong>Day</strong> shows where today sits in the distribution of every past year for this calendar day; <strong>Year</strong> shows the hot and cold spells of any year against the baseline. History is ERA5 reanalysis (1940+) or, optionally, the nearest NOAA station record back to the 1800s.</p>
+  <h1>Temperature Volatility Analysis</h1>
+  <p class="sub">How unusual, and how volatile, is the weather where you live — against a century of daily records.</p>
 
   <form id="f">
     <label>Zip code <input type="text" id="zip" inputmode="numeric" pattern="\d{5}" placeholder="e.g. 10001" required></label>
@@ -160,36 +181,43 @@
         <option value="mean">Daily mean</option>
       </select>
     </label>
-    <label>Day window
-      <select id="win">
-        <option value="0">Exact day only</option>
-        <option value="3">±3 days</option>
-        <option value="7">±7 days</option>
-      </select>
-    </label>
-    <label>History source
-      <select id="source">
-        <option value="longest">Longest (NOAA station + ERA5 fill)</option>
-        <option value="era5">ERA5 reanalysis only (1940+)</option>
-      </select>
-    </label>
-    <label>Baseline years
-      <span class="range">
-        <input type="number" id="b0" placeholder="earliest" min="1800" max="2100" step="1">
-        <span>–</span>
-        <input type="number" id="b1" value="2000" placeholder="latest" min="1800" max="2100" step="1">
-      </span>
-    </label>
     <button type="submit" id="go">Look up</button>
+    <details class="opts">
+      <summary>Options</summary>
+      <div class="optrow">
+        <label>Baseline years
+          <span class="range">
+            <input type="number" id="b0" placeholder="earliest" min="1800" max="2100" step="1">
+            <span>–</span>
+            <input type="number" id="b1" value="2000" placeholder="latest" min="1800" max="2100" step="1">
+          </span>
+        </label>
+        <label>History source
+          <select id="source">
+            <option value="longest">Longest (NOAA station + ERA5 fill)</option>
+            <option value="era5">ERA5 reanalysis only (1940+)</option>
+          </select>
+        </label>
+        <label>Day window <span class="hint">(Day tab)</span>
+          <select id="win">
+            <option value="0">Exact day only</option>
+            <option value="3">±3 days</option>
+            <option value="7">±7 days</option>
+          </select>
+        </label>
+      </div>
+    </details>
   </form>
 
   <div class="status" id="status"></div>
+  <nav class="tabs" role="tablist">
+    <a href="#year" data-page="year" role="tab">Year</a>
+    <a href="#day" data-page="day" role="tab">Day</a>
+    <a href="#decades" data-page="decades" role="tab">Decades</a>
+    <a href="#volatility" data-page="volatility" role="tab">Volatility</a>
+    <a href="#map" data-page="map" role="tab">Map</a>
+  </nav>
   <div id="out" hidden>
-    <nav class="tabs" role="tablist">
-      <a href="#year" data-page="year" role="tab">Year</a>
-      <a href="#day" data-page="day" role="tab">Day</a>
-      <a href="#decades" data-page="decades" role="tab">Decades</a>
-    </nav>
     <section id="page-day" class="page">
     <div class="card">
       <div class="hero" id="hero"></div>
@@ -281,7 +309,7 @@
           </label>
         </div>
       </div>
-      <p class="sub" style="margin:0 0 10px">For each year, how many days were hotter than the chosen threshold (up, reds, shaded by band) and how many colder (down, blues) relative to the baseline normal for that calendar day. Hot and cold are counted separately so they can't cancel. Solid lines are decade averages; dashed lines are the linear trend over complete years.</p>
+      <p class="sub" style="margin:0 0 10px">Hot days up, cold days down. Solid lines: decade averages. Dashed: trend.</p>
       <div id="dec"></div>
       <div class="legend" id="declegend"></div>
     </div>
@@ -290,8 +318,100 @@
       <div id="dectable"></div>
     </div>
     </section>
-    <p class="foot">Station history: NOAA GHCN-Daily via NCEI (the nearest station within ~35 mi with the longest well-covered record; daily mean = (high+low)/2; lags ~3 days). Reanalysis: ERA5 via Open-Meteo archive (1940–present, ~5 day lag). Recent days and today: Open-Meteo forecast API. Geocoding: zippopotam.us. Today's high may still rise until evening.</p>
+
+    <section id="page-volatility" class="page">
+    <div class="card">
+      <div class="panelhead">
+        <strong>Volatility index, every year</strong>
+        <div class="ctl">
+          <label>Measure as
+            <select id="vm">
+              <option value="spread">Spread of daily anomalies</option>
+              <option value="swing">Day-to-day swings</option>
+            </select>
+          </label>
+          <label>Smoothing
+            <select id="vk">
+              <option value="1" selected>None (daily)</option>
+              <option value="7">7-day</option>
+              <option value="14">14-day</option>
+              <option value="30">30-day</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <p class="sub" style="margin:0 0 10px">1.0 = as volatile as the baseline period; 1.2 = 20% more. Solid lines: decade averages. Dashed: trend.</p>
+      <div id="vol"></div>
+      <div class="legend" id="vollegend"></div>
+    </div>
+    </section>
   </div>
+
+  <section id="page-map" class="page">
+    <div class="card">
+      <div class="panelhead">
+        <strong>Days beyond the norm, across the country</strong>
+        <div class="ctl">
+          <label>Measure
+            <select id="gm">
+              <option value="max">Daily high</option>
+              <option value="min">Daily low</option>
+              <option value="mean">Daily mean</option>
+            </select>
+          </label>
+          <label>Show
+            <select id="gv">
+              <option value="hot">Hot days</option>
+              <option value="cold">Cold days</option>
+              <option value="net" selected>Hot − cold days</option>
+              <option value="anom">Mean anomaly (°F)</option>
+              <option value="spread">Volatility (spread)</option>
+              <option value="swing">Volatility (swings)</option>
+            </select>
+          </label>
+          <label>Beyond
+            <select id="gt">
+              <option value="1">±1σ (all bands)</option>
+              <option value="2">±2σ only</option>
+              <option value="3">±3σ only</option>
+            </select>
+          </label>
+          <label>Average over
+            <select id="gs">
+              <option value="1">Single year</option>
+              <option value="5">5 years</option>
+              <option value="10">10 years</option>
+            </select>
+          </label>
+          <label>Year
+            <span class="range">
+              <button type="button" class="nav" id="gyPrev" title="previous year">◀</button>
+              <input type="number" id="gy" step="1" style="width:76px">
+              <button type="button" class="nav" id="gyNext" title="next year">▶</button>
+            </span>
+          </label>
+          <button type="button" class="nav" id="gplay">▶ Play</button>
+        </div>
+      </div>
+      <p class="sub" style="margin:0 0 10px">One dot per station. Hover for the numbers, click to open that zip code. Drag the strip below the map to move through time.</p>
+      <div class="status" id="gstatus"></div>
+      <div id="gmap"></div>
+      <div class="legend" id="glegend"></div>
+      <div id="gstrip"></div>
+    </div>
+    <p class="foot" id="gfoot"></p>
+  </section>
+
+  <details class="methods">
+    <summary>Methods &amp; data</summary>
+    <p><strong>Baseline.</strong> Every comparison is against the baseline years (default: earliest record to 2000). For each calendar day the normal and its σ come from the baseline years' values for that day, pooled over ±7 days (±3 when smoothing). When a baseline year is itself being scored it is left out of its own normal.</p>
+    <p><strong>Day.</strong> Where the selected day's value sits in the baseline distribution for that calendar day: z-score, percentile, and every year's value for the same day.</p>
+    <p><strong>Year.</strong> Each day's departure from normal for one year, with the ±1σ / ±2σ bands; smoothing averages the actual and the baseline years alike so the bands stay honest.</p>
+    <p><strong>Decades.</strong> For every year, the number of days beyond +1σ / +2σ / +3σ (hot) and −1σ / −2σ / −3σ (cold), counted separately so they can't cancel; years with fewer than 300 valid days are faded.</p>
+    <p><strong>Volatility.</strong> <em>Spread</em>: the standard deviation of the year's daily z-scores around that year's own mean, so a uniformly warm year is not "volatile" — only swings are. <em>Day-to-day swings</em>: the root-mean-square change in z between consecutive days. Both are divided by their average over the baseline years, so 1.0 means as volatile as the baseline.</p>
+    <p><strong>Map.</strong> Precomputed for 1 in 100 contiguous-US zip codes, each mapped to the nearest NOAA station with a long, well-covered record (see <code>analysis/</code> in the repository); same definitions as above with a fixed 1940–2000 baseline. Dot colors use one scale across all years so the animation is comparable.</p>
+    <p><strong>Data.</strong> Station history: NOAA GHCN-Daily via NCEI (nearest station within ~35 mi with the longest well-covered record; daily mean = (high + low) / 2; lags ~3 days). Reanalysis: ERA5 via the Open-Meteo archive (1940–present, ~5 day lag), typically a degree or two cooler on daily highs than a station. Recent days and today: Open-Meteo forecast. Geocoding: zippopotam.us. Today's high may still rise until evening.</p>
+  </details>
 </main>
 <div class="tip" id="tip"></div>
 
@@ -659,6 +779,7 @@ function render(loc) {
   $('ay').min = firstYear; $('ay').max = new Date().getFullYear();
   drawAnomaly();
   drawDecades();
+  drawVolatility();
 
   drawTable(samples, today, selYear, selIso, baseYears, todayRec && todayRec.src[metric]);
   $('out').hidden = false;
@@ -686,12 +807,16 @@ $('pinned').addEventListener('click', e => {
   drawAnomaly();
 });
 
-// ---------- Pages (Day / Year) ----------
+// ---------- Pages (Day / Year / Decades / Map) ----------
+// Map page state (declared here because showPage runs at load).
+let geo = null, geoLoading = null, geoPlay = null, geoProj = null, geoStates = '';
+const GW = 960, GH = 600, GM = 12;
 function showPage(name) {
-  if (!['day', 'year', 'decades'].includes(name)) name = 'year';
+  if (!['day', 'year', 'decades', 'volatility', 'map'].includes(name)) name = 'year';
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + name));
   document.querySelectorAll('.tabs a').forEach(a => a.classList.toggle('active', a.dataset.page === name));
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  if (name === 'map') ensureGeo(); else stopGeoPlay();
 }
 window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
 showPage(location.hash.slice(1));
@@ -975,14 +1100,96 @@ function drawDecades() {
 }
 
 // Blue (cold) – neutral gray – red (hot); saturates at |z| = 2.5. Reads the theme tokens so dark mode gets its own steps.
-function divergingColor(z) {
+// ---------- Volatility page ----------
+['vm', 'vk'].forEach(id => $(id).addEventListener('change', drawVolatility));
+// Per year: spread = sd of daily z about the year's mean; swing = RMS change in z between consecutive days.
+function volatilityRows(k) {
+  const rows = [], thisYear = new Date().getFullYear();
+  for (let y = lastAnom.firstYear; y <= thisYear; y++) {
+    const r = computeAnomaly(y, 0, 11, k);
+    if (r.valid.length < 30) continue;
+    const z = r.valid.map(p => p.z), zm = z.reduce((a, b) => a + b, 0) / z.length;
+    const spread = Math.sqrt(z.reduce((a, b) => a + (b - zm) ** 2, 0) / z.length);
+    let ss = 0, sn = 0;
+    for (let i = 1; i < z.length; i++) if (r.valid[i].n === r.valid[i - 1].n + 1) { ss += (z[i] - z[i - 1]) ** 2; sn++; }
+    rows.push({ year: y, n: r.valid.length, complete: r.valid.length >= 300, spread, swing: sn >= 20 ? Math.sqrt(ss / sn) : null });
+  }
+  return rows;
+}
+function drawVolatility() {
+  if (!lastAnom) return;
+  const k = +$('vk').value, mode = $('vm').value;
+  const { baseLabel, baseYrs, metricName } = lastAnom;
+  const bmin = baseYrs[0], bmax = baseYrs[baseYrs.length - 1];
+  const rows = volatilityRows(k).filter(c => c[mode] != null);
+  const base = rows.filter(c => c.complete && c.year >= bmin && c.year <= bmax);
+  if (rows.length < 2 || base.length < 5) { $('vol').innerHTML = '<p class="status err">Not enough complete years in the baseline.</p>'; $('vollegend').innerHTML = ''; return; }
+  const ref = base.reduce((a, c) => a + c[mode], 0) / base.length;
+  for (const c of rows) c.v = c[mode] / ref;
+
+  const W = 880, H = 340, m = { t: 16, r: 20, b: 40, l: 48 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const y0 = rows[0].year, y1 = rows[rows.length - 1].year;
+  const vs = rows.map(c => c.v);
+  const lo = Math.min(0.7, ...vs) - 0.05, hi = Math.max(1.3, ...vs) + 0.05;
+  const x = yr => m.l + (yr - y0) / Math.max(1, y1 - y0) * iw;
+  const y = v => m.t + ih - (v - lo) / (hi - lo) * ih;
+
+  // Decade averages and linear trend over complete years.
+  const decades = new Map();
+  for (const c of rows) { if (!c.complete) continue; const d = Math.floor(c.year / 10) * 10; const g = decades.get(d) || { decade: d, sum: 0, n: 0 }; g.sum += c.v; g.n++; decades.set(d, g); }
+  const pts = rows.filter(c => c.complete), n = pts.length;
+  const mx = pts.reduce((a, c) => a + c.year, 0) / n, my = pts.reduce((a, c) => a + c.v, 0) / n;
+  const slope = pts.reduce((a, c) => a + (c.year - mx) * (c.v - my), 0) / pts.reduce((a, c) => a + (c.year - mx) ** 2, 0);
+  const at = yr => my + slope * (yr - mx);
+
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Volatility index per year">`;
+  s += '<g class="grid">';
+  const step = hi - lo > 1.5 ? 0.25 : 0.1;
+  for (let t = Math.ceil(lo / step) * step; t <= hi; t += step)
+    s += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}"/><text class="tick" x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${t.toFixed(2)}</text>`;
+  s += '</g>';
+  s += `<line class="zero" x1="${m.l}" x2="${W - m.r}" y1="${y(1)}" y2="${y(1)}"/><text class="lbl" x="${W - m.r}" y="${y(1) - 5}" text-anchor="end">baseline ${baseLabel}</text>`;
+  for (const g of decades.values()) {
+    const xa = x(Math.max(g.decade, y0)), xb = x(Math.min(g.decade + 9, y1)), v = g.sum / g.n;
+    s += `<line x1="${xa}" x2="${xb}" y1="${y(v)}" y2="${y(v)}" stroke="var(--ink)" stroke-width="2.5"/>`;
+  }
+  s += `<line class="strend" x1="${x(y0)}" x2="${x(y1)}" y1="${y(at(y0))}" y2="${y(at(y1))}"/>`;
+  s += `<path class="vline" d="${pts.map((c, i) => (i ? 'L' : 'M') + x(c.year).toFixed(1) + ',' + y(c.v).toFixed(1)).join('')}" opacity="0.5"/>`;
+  const bw = iw / Math.max(1, y1 - y0);
+  for (const c of rows) {
+    const what = mode === 'spread' ? `spread of daily z: ${c.spread.toFixed(2)}σ` : `day-to-day swing: ${c.swing.toFixed(2)}σ`;
+    const tipText = `${c.year}${c.complete ? '' : ` (partial: ${c.n} days)`}\nvolatility index ${c.v.toFixed(2)} (${what})`;
+    s += `<circle class="vdot${c.complete ? '' : ' out'}" cx="${x(c.year).toFixed(1)}" cy="${y(c.v).toFixed(1)}" r="3.5"/>`;
+    s += `<rect class="hit" x="${(x(c.year) - bw / 2).toFixed(1)}" y="${m.t}" width="${bw.toFixed(1)}" height="${ih}" data-tip="${esc(tipText)}" data-x="${x(c.year).toFixed(1)}"/>`;
+  }
+  s += `<g class="axis"><line x1="${m.l}" x2="${W - m.r}" y1="${m.t + ih}" y2="${m.t + ih}"/></g>`;
+  for (let yr = Math.ceil(y0 / 10) * 10; yr <= y1; yr += 10)
+    s += `<text class="tick" x="${x(yr)}" y="${m.t + ih + 18}" text-anchor="middle">${yr}</text>`;
+  s += `<line class="xhair" x1="0" x2="0" y1="${m.t}" y2="${m.t + ih}"/></svg>`;
+  $('vol').innerHTML = s;
+
+  const last = pts.slice(-10), recent = last.reduce((a, c) => a + c.v, 0) / last.length;
+  const pct = v => `${v >= 0 ? '+' : '−'}${Math.abs(Math.round(v * 100))}%`;
+  $('vollegend').innerHTML = `<span>Daily ${metricName} · ${k > 1 ? `${k}-day smoothed` : 'unsmoothed'}</span>` +
+    `<span><i class="sw" style="background:var(--ink);height:3px"></i> decade average</span><span><i class="sw" style="border-top:2px dashed var(--ink-2);height:0"></i> trend ${pct(slope * 10)} per decade</span>` +
+    `<span>Last 10 complete years: ${pct(recent - 1)} vs baseline</span>`;
+}
+
+// --cold / --mid / --hot as rgb triples (re-read when the theme changes).
+function palette() {
   const cs = getComputedStyle(document.documentElement);
   const hex = v => { const h = cs.getPropertyValue(v).trim(); return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; };
-  const pal = divergingColor.pal && divergingColor.pal.key === cs.getPropertyValue('--mid') ? divergingColor.pal
-    : (divergingColor.pal = { key: cs.getPropertyValue('--mid'), mid: hex('--mid'), cold: hex('--cold'), hot: hex('--hot') });
-  const pole = z < 0 ? pal.cold : pal.hot;
-  const t = Math.min(1, Math.abs(z) / 2.5) ** 0.8;
-  return `rgb(${pal.mid.map((c, i) => Math.round(c + (pole[i] - c) * t)).join(',')})`;
+  return palette.pal && palette.pal.key === cs.getPropertyValue('--mid') ? palette.pal
+    : (palette.pal = { key: cs.getPropertyValue('--mid'), mid: hex('--mid'), cold: hex('--cold'), hot: hex('--hot') });
+}
+// t in [0,1] from --mid toward --hot (pole > 0) or --cold.
+function poleColor(t, pole) {
+  const pal = palette(), to = pole < 0 ? pal.cold : pal.hot;
+  return `rgb(${pal.mid.map((c, i) => Math.round(c + (to[i] - c) * t)).join(',')})`;
+}
+function divergingColor(z) {
+  return poleColor(Math.min(1, Math.abs(z) / 2.5) ** 0.8, z);
 }
 
 let lastSeries = null;
@@ -1165,6 +1372,186 @@ function niceTicks(max) {
   return out;
 }
 const esc = s => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+// ---------- Map page: precomputed per-station "days beyond ±σ" (analysis/compute_decades.py -> data/geo-decades.json) ----------
+
+async function ensureGeo() {
+  if (geo || geoLoading) return;
+  geoLoading = (async () => {
+    $('gstatus').textContent = 'Loading map data…';
+    try {
+      const [d, outline] = await Promise.all([
+        fetch('data/geo-decades.json').then(r => { if (!r.ok) throw new Error(`geo-decades.json: ${r.status}`); return r.json(); }),
+        fetch('data/conus-states.json').then(r => { if (!r.ok) throw new Error(`conus-states.json: ${r.status}`); return r.json(); }),
+      ]);
+      geoProj = fitProjection(outline);
+      geoStates = outline.features.map(f => `<path class="gstate" d="${f.geometry.coordinates.map(poly => poly.map(ring => 'M' + ring.map(([lo, la]) => geoProj(lo, la).map(v => v.toFixed(1)).join(',')).join('L') + 'Z').join('')).join('')}"/>`).join('');
+      geo = d;
+      geo.k = String(d.meta.smooth[0]);
+      geo.years0 = d.years[0];
+      // Year range: from the first year in which ≥ 25% of stations have a complete year, to the last complete year.
+      const complete = yi => d.data.max[geo.k].reduce((a, row) => a + (row[yi] && row[yi][6] >= 300 ? 1 : 0), 0);
+      let y0 = d.years.findIndex((_, i) => complete(i) >= 0.25 * d.locations.length); if (y0 < 0) y0 = 0;
+      let y1 = d.years.length - 1; while (y1 > y0 && complete(y1) < 0.25 * d.locations.length) y1--;
+      geo.yMin = d.years[y0]; geo.yMax = d.years[y1];
+      $('gy').min = geo.yMin; $('gy').max = d.years[d.years.length - 1];
+      if (!$('gy').value) $('gy').value = geo.yMax;
+      $('gstatus').textContent = '';
+      $('gfoot').textContent = `${d.locations.length} stations (1 in 100 contiguous-US zip codes, each mapped to the nearest long-record NOAA GHCN-Daily station); baseline ${d.meta.baseline[0]}–${d.meta.baseline[1]}, same leave-one-out daily climatology as the Decades tab. Source: ${d.meta.source}. Generated ${d.meta.generated.slice(0, 10)}.`;
+      drawGeo();
+    } catch (e) {
+      $('gstatus').textContent = `Map data unavailable: ${e.message}`; $('gstatus').className = 'status err';
+    }
+  })();
+}
+
+// Albers equal-area conic (the usual CONUS parameters), scaled to fit the outline into GW × GH.
+function fitProjection(outline) {
+  const r = Math.PI / 180, p1 = 29.5 * r, p2 = 45.5 * r, p0 = 23 * r, l0 = -96 * r;
+  const n = (Math.sin(p1) + Math.sin(p2)) / 2, C = Math.cos(p1) ** 2 + 2 * n * Math.sin(p1), rho0 = Math.sqrt(C - 2 * n * Math.sin(p0)) / n;
+  const raw = (lon, lat) => { const rho = Math.sqrt(C - 2 * n * Math.sin(lat * r)) / n, th = n * (lon * r - l0); return [rho * Math.sin(th), rho0 - rho * Math.cos(th)]; };
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const f of outline.features) for (const poly of f.geometry.coordinates) for (const ring of poly) for (const [lo, la] of ring) {
+    const [x, y] = raw(lo, la); if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  const sc = Math.min((GW - 2 * GM) / (x1 - x0), (GH - 2 * GM) / (y1 - y0));
+  const ox = (GW - sc * (x1 - x0)) / 2, oy = (GH - sc * (y1 - y0)) / 2;
+  return (lon, lat) => { const [x, y] = raw(lon, lat); return [ox + (x - x0) * sc, oy + (y1 - y) * sc]; };
+}
+
+// Value for one station-year under the current controls; null when that year is missing or (for counts) incomplete.
+// Volatility views are divided by `ref`, that station's baseline-period average, so 1.0 = baseline-typical.
+function geoValue(row, view, T, ref) {
+  if (!row || row[6] < 300) return null;
+  if (view === 'spread' || view === 'swing') { const v = row[view === 'spread' ? 8 : 9]; return v == null || !ref ? null : v / ref; }
+  const hot = row.slice(T - 1, 3).reduce((a, b) => a + b, 0), cold = row.slice(2 + T, 6).reduce((a, b) => a + b, 0);
+  return view === 'hot' ? hot : view === 'cold' ? cold : view === 'net' ? hot - cold : row[7];
+}
+// Per station: value at year index yi, averaged over `span` years centered there (needs > half of them).
+function geoSeries(li, view, T, span) {
+  const rows = geo.data[$('gm').value][geo.k][li], h = Math.floor(span / 2), out = new Array(rows.length).fill(null);
+  let ref = null;
+  if (view === 'spread' || view === 'swing') {
+    const f = view === 'spread' ? 8 : 9, [b0, b1] = geo.meta.baseline, vals = [];
+    for (let i = 0; i < rows.length; i++) { const yr = geo.years0 + i, r = rows[i]; if (yr >= b0 && yr <= b1 && r && r[6] >= 300 && r[f] != null) vals.push(r[f]); }
+    if (vals.length < 5) return out;
+    ref = vals.reduce((a, b) => a + b, 0) / vals.length;
+  }
+  for (let i = 0; i < rows.length; i++) {
+    let sum = 0, n = 0;
+    for (let j = i - h; j < i - h + span; j++) { const v = j >= 0 && j < rows.length ? geoValue(rows[j], view, T, ref) : null; if (v != null) { sum += v; n++; } }
+    if (n > span / 2) out[i] = sum / n;
+  }
+  return out;
+}
+
+function drawGeo() {
+  if (!geo) return;
+  const view = $('gv').value, T = +$('gt').value, span = +$('gs').value;
+  const year = Math.max(+$('gy').min, Math.min(+$('gy').max, +$('gy').value || geo.yMax));
+  $('gy').value = year;
+  const yi = year - geo.years0;
+  const L = geo.locations, series = L.map((_, li) => geoSeries(li, view, T, span));
+  const isVol = view === 'spread' || view === 'swing', center = isVol ? 1 : 0;   // volatility is diverging about 1.0
+  const unit = view === 'anom' ? '°F' : isVol ? '× baseline' : 'days';
+  const gfmt = v => view === 'anom' ? fmt1(v) : isVol ? v.toFixed(2) : String(Math.round(v));
+
+  // Color scale fixed across years (so the animation is comparable): 95th percentile of |value| over every station-year.
+  const all = []; for (const s of series) for (const v of s) if (v != null) all.push(Math.abs(v - center));
+  all.sort((a, b) => a - b);
+  const vmax = Math.max(view === 'anom' ? 1 : isVol ? 0.1 : 5, all[Math.floor(all.length * 0.95)] || 0);
+  const color = v => view === 'hot' ? poleColor(Math.min(1, v / vmax), 1) : view === 'cold' ? poleColor(Math.min(1, v / vmax), -1) : poleColor(Math.min(1, Math.abs(v - center) / vmax), v - center);
+
+  // Map
+  let s = `<svg viewBox="0 0 ${GW} ${GH}" role="img" aria-label="Map of days beyond ±${T}σ in ${year}">${geoStates}`;
+  const bandLabel = ['> +1σ', '> +2σ', '> +3σ'], cbandLabel = ['< −1σ', '< −2σ', '< −3σ'];
+  const vals = [];
+  for (let li = 0; li < L.length; li++) {
+    const loc = L[li], [cx, cy] = geoProj(loc.lon, loc.lat), v = series[li][yi];
+    const row = geo.data[$('gm').value][geo.k][li][yi];
+    const st = loc.station ? `\n${loc.station.name} (${loc.station.id}), ${loc.station.dist} mi, ${loc.station.start}–${loc.station.end}` : '';
+    let tipText = `${loc.place}, ${loc.state} (${loc.zip})${st}`;
+    if (row) {
+      const hotN = [0, 1, 2].map(i => row.slice(i, 3).reduce((a, b) => a + b, 0)), coldN = [0, 1, 2].map(i => row.slice(3 + i, 6).reduce((a, b) => a + b, 0));
+      tipText += `\n${year}${row[6] < 300 ? ` (partial: ${row[6]} days)` : ''}: hot ${hotN.map((c, i) => `${c} ${bandLabel[i]}`).join(' · ')}\ncold ${coldN.map((c, i) => `${c} ${cbandLabel[i]}`).join(' · ')}\navg ${row[7] >= 0 ? '+' : ''}${fmt1(row[7])}°F vs normal`;
+      if (row[8] != null) tipText += `\nvolatility: spread ${row[8].toFixed(2)}σ${row[9] == null ? '' : `, swing ${row[9].toFixed(2)}σ`}`;
+      if (span > 1 && v != null) tipText += `\n${span}-yr mean: ${v >= 0 && (view === 'net' || view === 'anom') ? '+' : ''}${gfmt(v)} ${unit}`;
+    } else tipText += `\n${year}: no data`;
+    if (v == null) s += `<circle class="gdot none" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="4" data-tip="${esc(tipText)}"/>`;
+    else { vals.push(v); s += `<circle class="gdot" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="6.5" fill="${color(v)}" data-tip="${esc(tipText)}" data-zip="${loc.zip}"/>`; }
+  }
+  s += '</svg>';
+  $('gmap').innerHTML = s;
+
+  // Legend + summary
+  const pal = palette(), rgb = c => `rgb(${c.join(',')})`;
+  const grad = view === 'hot' ? `linear-gradient(90deg, ${rgb(pal.mid)}, ${rgb(pal.hot)})` : view === 'cold' ? `linear-gradient(90deg, ${rgb(pal.mid)}, ${rgb(pal.cold)})` : `linear-gradient(90deg, ${rgb(pal.cold)}, ${rgb(pal.mid)}, ${rgb(pal.hot)})`;
+  const lo = view === 'hot' || view === 'cold' ? '0' : isVol ? gfmt(1 - vmax) : `−${gfmt(vmax)}`, hi = view === 'hot' || view === 'cold' ? gfmt(vmax) : isVol ? gfmt(1 + vmax) : `+${gfmt(vmax)}`;
+  const what = view === 'hot' ? `days > +${T}σ` : view === 'cold' ? `days < −${T}σ` : view === 'net' ? `(days > +${T}σ) − (days < −${T}σ)` : view === 'anom' ? 'mean anomaly vs normal' : view === 'spread' ? 'spread of daily anomalies, 1.0 = baseline' : 'day-to-day swings, 1.0 = baseline';
+  const med = vals.length ? vals.sort((a, b) => a - b)[Math.floor(vals.length / 2)] : null;
+  $('glegend').innerHTML = `<span>${lo} <i class="gseq" style="background:${grad}"></i> ${hi} ${unit}${span > 1 ? ` (${span}-yr mean)` : ''}</span><span>${what}</span>` +
+    `<span><i class="sw" style="border:1px dashed var(--axis)"></i> no data</span>` +
+    (med == null ? '' : `<span><strong>${year}</strong>: median station ${med >= 0 && (view === 'net' || view === 'anom') ? '+' : ''}${gfmt(med)} ${unit} (${vals.length} stations)</span>`);
+
+  drawGeoStrip(series, view, year, unit, gfmt, center);
+}
+
+// Strip chart: median across stations per year; the scrubber.
+function drawGeoStrip(series, view, year, unit, gfmt, center) {
+  const Y = geo.years, W = GW, H = 110, m = { t: 8, r: 12, b: 22, l: 40 }, iw = W - m.l - m.r, ih = H - m.t - m.b;
+  // Bars are the median station's departure from `center` (0 for counts and anomaly, 1.0 for volatility).
+  const med = Y.map((_, yi) => { const v = series.map(s => s[yi]).filter(v => v != null).sort((a, b) => a - b); return v.length >= 0.25 * series.length ? v[Math.floor(v.length / 2)] - center : null; });
+  const i0 = geo.yMin - geo.years0, i1 = Y.length - 1;
+  const lim = Math.max(center ? 0.05 : 1, ...med.filter(v => v != null).map(Math.abs)) * 1.1;
+  const signed = view !== 'hot' && view !== 'cold';
+  const x = yi => m.l + (yi - i0) / (i1 - i0 + 1) * iw, bw = iw / (i1 - i0 + 1);
+  const y = v => signed ? m.t + ih / 2 - v / lim * ih / 2 : m.t + ih - v / lim * ih;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Median across stations by year">`;
+  s += `<g class="grid"><line x1="${m.l}" x2="${W - m.r}" y1="${y(0)}" y2="${y(0)}"/></g>`;
+  s += `<text class="tick" x="${m.l - 6}" y="${y(lim / 1.1) + 4}" text-anchor="end">${signed && !center ? '+' : ''}${gfmt(center + lim / 1.1)}</text>`;
+  if (signed) s += `<text class="tick" x="${m.l - 6}" y="${y(-lim / 1.1) + 4}" text-anchor="end">${center ? '' : '−'}${gfmt(center - lim / 1.1)}</text>`;
+  s += `<text class="tick" x="${m.l - 6}" y="${y(0) + 4}" text-anchor="end">${gfmt(center)}</text>`;
+  for (let yi = i0; yi <= i1; yi++) {
+    const v = med[yi]; if (v == null) continue;
+    const fill = view === 'hot' ? 'var(--hot)' : view === 'cold' ? 'var(--cold)' : v >= 0 ? 'var(--hot)' : 'var(--cold)';
+    s += `<rect x="${x(yi).toFixed(1)}" y="${Math.min(y(v), y(0)).toFixed(1)}" width="${Math.max(bw - 1, 0.8).toFixed(1)}" height="${Math.abs(y(v) - y(0)).toFixed(1)}" fill="${fill}" opacity="${Y[yi] === year ? 1 : 0.55}"/>`;
+  }
+  for (let yr = Math.ceil(geo.yMin / 10) * 10; yr <= Y[i1]; yr += 10)
+    s += `<text class="tick" x="${x(yr - geo.years0) + bw / 2}" y="${H - 6}" text-anchor="middle">${yr}</text>`;
+  const cx = x(year - geo.years0) + bw / 2;
+  s += `<line class="gcur" x1="${cx}" x2="${cx}" y1="${m.t}" y2="${m.t + ih}"/>`;
+  const right = cx > W * 0.8;
+  s += `<text class="lbl" x="${cx + (right ? -4 : 4)}" y="${m.t + 10}" text-anchor="${right ? 'end' : 'start'}">${year}${med[year - geo.years0] == null ? '' : `: ${gfmt(center + med[year - geo.years0])} ${unit}`}</text>`;
+  s += `<rect id="gscrub" x="${m.l}" y="0" width="${iw}" height="${H}" fill="transparent"/></svg>`;
+  $('gstrip').innerHTML = s;
+  const svg = $('gstrip').querySelector('svg');
+  const pick = e => {
+    const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) / r.width * W;
+    const yi = Math.max(i0, Math.min(i1, i0 + Math.floor((px - m.l) / bw)));
+    if (Y[yi] !== +$('gy').value) { $('gy').value = Y[yi]; drawGeo(); }
+  };
+  svg.addEventListener('pointerdown', e => { stopGeoPlay(); pick(e); svg.setPointerCapture(e.pointerId); svg.onpointermove = pick; });
+  svg.addEventListener('pointerup', () => { svg.onpointermove = null; });
+}
+
+function stopGeoPlay() { if (geoPlay) { clearInterval(geoPlay); geoPlay = null; $('gplay').textContent = '▶ Play'; } }
+$('gplay').addEventListener('click', () => {
+  if (geoPlay) return stopGeoPlay();
+  if (!geo) return;
+  if (+$('gy').value >= geo.yMax) $('gy').value = geo.yMin;
+  $('gplay').textContent = '⏸ Pause';
+  geoPlay = setInterval(() => { if (+$('gy').value >= geo.yMax) return stopGeoPlay(); $('gy').value = +$('gy').value + 1; drawGeo(); }, 400);
+});
+['gm', 'gv', 'gt', 'gs', 'gy'].forEach(id => $(id).addEventListener('change', () => { stopGeoPlay(); drawGeo(); }));
+$('gyPrev').addEventListener('click', () => { stopGeoPlay(); $('gy').value = +$('gy').value - 1; drawGeo(); });
+$('gyNext').addEventListener('click', () => { stopGeoPlay(); $('gy').value = +$('gy').value + 1; drawGeo(); });
+// Click a station: load its zip in the other tabs and jump to Decades.
+$('gmap').addEventListener('click', e => {
+  const c = e.target.closest('[data-zip]'); if (!c) return;
+  $('zip').value = c.dataset.zip;
+  showPage('decades');
+  $('f').requestSubmit();
+});
 
 // tooltip
 const tip = $('tip');
